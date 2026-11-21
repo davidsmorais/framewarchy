@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# discover-fan — unprivileged one-shot discovery for the io.github.davidsmorais.omarchy-framework-fan-control plugin.
+# discover-fan — unprivileged one-shot discovery for the io.github.davidsmorais.framewarchy plugin.
 #
 # Prints the paths the plugin should poll:
 #
 #   fan=<path>   cros_ec fan1_input (RPM)
 #   temp=<path>  the EC's CPU-labeled sensor, falling back to coretemp's
 #                "Package id 0" sensor
+#   bat=<path>   the first power_supply of type Battery (its uevent file)
 #
 # A missing line means that sensor was not found. OMARCHY_FANCTL_TEST_ROOT
-# replaces /sys/class/hwmon for the test suite.
+# replaces /sys/class/hwmon and OMARCHY_FANCTL_TEST_PS replaces
+# /sys/class/power_supply for the test suite.
 
 set -u
 
@@ -54,5 +56,16 @@ for dir in "$root"/hwmon*; do
   [ -z "$temp" ] || break
 done
 
+ps_root=${OMARCHY_FANCTL_TEST_PS:-/sys/class/power_supply}
+bat=""
+for dir in "$ps_root"/*; do
+  [ -r "$dir/type" ] && [ -r "$dir/uevent" ] || continue
+  IFS= read -r type < "$dir/type" || continue
+  [ "$type" = Battery ] || continue
+  bat="$dir/uevent"
+  break
+done
+
 [ -n "$fan" ] && printf 'fan=%s\n' "$fan"
 [ -n "$temp" ] && printf 'temp=%s\n' "$temp"
+[ -n "$bat" ] && printf 'bat=%s\n' "$bat"

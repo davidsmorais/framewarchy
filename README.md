@@ -1,6 +1,6 @@
-# Framework Fan Control for Omarchy
+# Framewarchy for Omarchy
 
-<p align="center"><img src="preview.png" width="420" alt="Framework Fan Control"></p>
+<p align="center"><img src="preview.png" width="420" alt="Framewarchy"></p>
 
 A bar widget for Framework laptops: the fan's RPM and the EC's CPU
 temperature in the bar, and a popup that switches the fan between the
@@ -27,6 +27,11 @@ embedded controller's automatic control and a manual duty cycle.
 - The slider **stages** while automatic: moving it never touches the fan
   until Manual is engaged. Presets engage manual directly.
 - Right-click the bar icon to restore automatic control immediately.
+- **Battery** in the bar (icon + percentage, colored green / yellow / orange /
+  red by level, accent while charging) and in the panel: capacity, time
+  left, charge cycles, live power draw, a 48 h charge history, the top CPU
+  consumers, and a Power-saver / Balanced / Performance profile switch
+  (`powerprofilesctl`).
 - Panel keys: `1`/`2`/`3` presets, `A` automatic, `Esc` closes.
 - Monitoring (RPM, CPU temp, current mode) is read straight from hwmon
   sysfs and a world-readable state file — no process per reading.
@@ -49,11 +54,11 @@ root-only `/dev/cros_ec`.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/davidsmorais/omarchy-framework-fan-control --yes
-cd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control
+omarchy plugin add https://github.com/davidsmorais/framewarchy --yes
+cd ~/.config/omarchy/plugins/io.github.davidsmorais.framewarchy
 sudo ./setup install
-omarchy plugin enable io.github.davidsmorais.omarchy-framework-fan-control
-omarchy bar move io.github.davidsmorais.omarchy-framework-fan-control --section right
+omarchy plugin enable io.github.davidsmorais.framewarchy
+omarchy bar move io.github.davidsmorais.framewarchy --section right
 ```
 
 `setup install` copies the root-owned helper to
@@ -81,17 +86,17 @@ systemd suspend hook. Nothing goes into `/usr/share/omarchy/`.
 ## Update
 
 ```bash
-cd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control
+cd ~/.config/omarchy/plugins/io.github.davidsmorais.framewarchy
 sudo ./setup install     # keeps the installed helper in sync
 ```
 
 ## Uninstall
 
 ```bash
-cd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control
+cd ~/.config/omarchy/plugins/io.github.davidsmorais.framewarchy
 sudo ./setup uninstall   # restores automatic control, removes every trace
-omarchy plugin disable io.github.davidsmorais.omarchy-framework-fan-control
-omarchy plugin remove io.github.davidsmorais.omarchy-framework-fan-control --yes
+omarchy plugin disable io.github.davidsmorais.framewarchy
+omarchy plugin remove io.github.davidsmorais.framewarchy --yes
 ```
 
 ## Development

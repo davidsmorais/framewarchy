@@ -84,5 +84,25 @@ check("heatLevel: unknown reading", heatLevel(-1) === "unknown")
 // ---- markup-shaped input never produces interpretable output sinks ----
 check("fanPercentAuto: garbage stays 0", fanPercentAuto("<i>hi</i>", FAN_MAX_RPM) === 0)
 
+// ---- battery ----
+const bat = parseBattery("POWER_SUPPLY_STATUS=Discharging\nPOWER_SUPPLY_CAPACITY=92\nPOWER_SUPPLY_CYCLE_COUNT=19\nPOWER_SUPPLY_VOLTAGE_NOW=16000000\nPOWER_SUPPLY_VOLTAGE_MIN_DESIGN=15000000\nPOWER_SUPPLY_CURRENT_NOW=2000000\nPOWER_SUPPLY_CHARGE_FULL=3000000\nPOWER_SUPPLY_CHARGE_NOW=2000000\n")
+check("parseBattery: percent", bat.percent === 92 && bat.present)
+check("parseBattery: watts", Math.abs(bat.watts - 32) < 0.01)
+check("parseBattery: size Wh", Math.abs(bat.sizeWh - 45) < 0.01)
+check("parseBattery: minutes left", Math.round(bat.minutes) === 60)
+check("parseBattery: empty is absent", parseBattery("").present === false)
+check("batteryLevel: bands", batteryLevel(80, "Discharging") === "full" && batteryLevel(40, "Discharging") === "ok" && batteryLevel(20, "Discharging") === "low" && batteryLevel(5, "Discharging") === "critical")
+check("batteryLevel: charging wins", batteryLevel(5, "Charging") === "charging")
+check("formatDuration", formatDuration(125) === "2h 05m" && formatDuration(42) === "42m" && formatDuration(-1) === "—")
+const cons = parseConsumers("chrome 10.0\nIsolated Web Co 3.5\nchrome 5\nidle 0.0\n", 5)
+check("parseConsumers: sums per name, sorted", cons.length === 2 && cons[0].name === "chrome" && cons[0].cpu === 15)
+const topOut = "top - 1\n  PID USER PR NI VIRT RES SHR S %CPU %MEM TIME+ COMMAND\n 1 a 20 0 1 1 1 S 99.0 1 0:01 old\ntop - 2\n  PID USER PR NI VIRT RES SHR S %CPU %MEM TIME+ COMMAND\n 2 a 20 0 1 1 1 S 12.5 1 0:01 chrome\n 3 a 20 0 1 1 1 S 7,5 1 0:01 chrome\n 4 a 20 0 1 1 1 R 50.0 1 0:01 top\n"
+const topList = parseTop(topOut, 5)
+check("parseTop: last iteration, summed, top excluded", topList.length === 1 && topList[0].name === "chrome" && topList[0].cpu === 20)
+check("pushHistory: drops old samples", pushHistory([{ t: 0, p: 50 }], HISTORY_MAX_MS + 10, 40).length === 1)
+check("historySummary", historySummary([{ t: 0, p: 2 }, { t: 60000, p: 92 }]) === "2–92% over 1m · now 92%")
+check("historyBuckets: count", historyBuckets([{ t: 0, p: 10 }, { t: 100, p: 20 }], 4).length === 4)
+check("parseDiscovery: bat path", parseDiscovery("bat=/x/uevent").batPath === "/x/uevent")
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

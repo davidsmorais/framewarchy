@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Systemd system-sleep hook installed by io.github.davidsmorais.omarchy-framework-fan-control's setup.
+# Systemd system-sleep hook installed by io.github.davidsmorais.framewarchy's setup.
 #
 # Restores automatic fan control before suspend when a manual duty was
 # active, so the EC never sleeps with a pinned duty. Runs as root; exit 0

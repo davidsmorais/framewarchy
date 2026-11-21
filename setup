@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# setup — install/remove the privileged integration for io.github.davidsmorais.omarchy-framework-fan-control.
+# setup — install/remove the privileged integration for io.github.davidsmorais.framewarchy.
 #
 #   sudo ./setup install [--user USER]    install helper, sudo whitelist,
 #                                         state dir and the suspend hook

@@ -20,8 +20,8 @@ import "Model.js" as Model
 // EC forgets manual duties on reboot, which the boot-id check catches.
 Panel {
   id: root
-  moduleName: "io.github.davidsmorais.omarchy-framework-fan-control"
-  ipcTarget: "io.github.davidsmorais.omarchy-framework-fan-control"
+  moduleName: "io.github.davidsmorais.framewarchy"
+  ipcTarget: "io.github.davidsmorais.framewarchy"
   manageIpc: false
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
@@ -52,7 +52,7 @@ Panel {
   }
 
   // ---- state ----------------------------------------------------------
-  property var found: ({ fanPath: "", tempPath: "" })
+  property var found: ({ fanPath: "", tempPath: "", batPath: "" })
   property int rpmValue: 0
   property int cpuTempC: -1
   property string mode: "auto"
@@ -62,6 +62,21 @@ Panel {
   property bool applying: false
   property bool dragging: false
   property string curve: "stock"
+
+  // ---- battery state ----
+  property var battery: Model.parseBattery("")
+  property var history: []
+  property var consumers: []
+  property string powerProfile: ""
+  readonly property bool hasBattery: found.batPath !== "" && battery.present
+  readonly property string batteryLevel: Model.batteryLevel(battery.percent, battery.status)
+  readonly property color batteryColor: batteryLevel === "charging" ? Commons.Color.accent
+    : batteryLevel === "full" ? "#5faf5f"
+    : batteryLevel === "ok" ? "#d0a215"
+    : batteryLevel === "low" ? "#e08a1e"
+    : Commons.Color.urgent
+  readonly property string batteryGlyph: Model.batteryIcon(battery.percent, battery.status)
+  readonly property string historyPath: Quickshell.env("HOME") + "/.local/state/framewarchy/battery-history.json"
 
   readonly property bool available: found.fanPath !== ""
   // Reading an installed binary as text only answers "is it here": search
@@ -75,6 +90,8 @@ Panel {
     if (!opened) return
     discoverProc.running = true
     curvesProc.running = true
+    consumersProc.running = true
+    profileGetProc.running = true
   }
 
   // ---- finding the sensors ---------------------------------------------
@@ -119,6 +136,24 @@ Panel {
     }
   }
 
+  FileView {
+    id: batFile
+    path: root.found.batPath
+    blockLoading: true
+    printErrors: false
+    onLoaded: root.battery = Model.parseBattery(text())
+  }
+
+  // The history file is read once; samples are appended every few minutes
+  // and the whole (48 h, a few hundred entries) list is written back.
+  FileView {
+    id: historyFile
+    path: root.historyPath
+    blockLoading: true
+    printErrors: false
+    onLoaded: root.history = Model.parseHistory(text())
+  }
+
   FileView { id: bootFile; path: "/proc/sys/kernel/random/boot_id"; blockLoading: true; printErrors: false }
 
   // Presence checks for the privileged helper and ectool.
@@ -133,7 +168,72 @@ Panel {
       rpmFile.reload()
       tempFile.reload()
       stateFile.reload()
+      batFile.reload()
     }
+  }
+
+  // ---- battery history: one sample per 5 minutes, kept for 48 h ----------
+  function sampleBattery() {
+    if (!hasBattery) return
+    history = Model.pushHistory(history, Date.now(), battery.percent)
+    historyWriteProc.command = ["bash", "-c",
+      'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"', "sh", historyPath, JSON.stringify(history)]
+    historyWriteProc.running = true
+  }
+
+  Process { id: historyWriteProc }
+
+  Timer {
+    interval: 300000
+    running: root.hasBattery
+    repeat: true
+    onTriggered: root.sampleBattery()
+  }
+
+  // First sample shortly after the readings land.
+  Timer {
+    interval: 3000
+    running: true
+    repeat: false
+    onTriggered: root.sampleBattery()
+  }
+
+  // ---- top consumers and power profile (only while the panel is open) ----
+  Process {
+    id: consumersProc
+    command: ["top", "-b", "-n", "2", "-d", "1", "-w", "200"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.consumers = Model.parseTop(text, 5)
+    }
+  }
+
+  Timer {
+    interval: 5000
+    running: root.opened
+    repeat: true
+    onTriggered: consumersProc.running = true
+  }
+
+  Process {
+    id: profileGetProc
+    command: ["powerprofilesctl", "get"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.powerProfile = text.trim()
+    }
+  }
+
+  function setPowerProfile(name) {
+    if (name !== "power-saver" && name !== "balanced" && name !== "performance") return
+    powerProfile = name
+    profileSetProc.command = ["powerprofilesctl", "set", name]
+    profileSetProc.running = true
+  }
+
+  Process {
+    id: profileSetProc
+    onExited: profileGetProc.running = true
   }
 
   // ---- controlling the fan ----------------------------------------------
@@ -228,7 +328,7 @@ Panel {
 
   // ---- IPC ---------------------------------------------------------------
   IpcHandler {
-    target: "io.github.davidsmorais.omarchy-framework-fan-control"
+    target: "io.github.davidsmorais.framewarchy"
 
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -246,6 +346,9 @@ Panel {
         curve: root.curve,
         rpm: root.rpmValue,
         cpuTempC: root.cpuTempC,
+        batteryPercent: root.battery.percent,
+        batteryStatus: root.battery.status,
+        powerProfile: root.powerProfile,
         error: root.errorText
       })
     }
@@ -272,9 +375,11 @@ Panel {
       if (!root.available) return root.tr("status.noFan")
       var rpm = Commons.I18n.formatNumber(root.rpmValue, 0)
       var temp = root.cpuTempC >= 0 ? Commons.I18n.formatNumber(root.cpuTempC, 0) : "—"
-      return root.manual
+      var tip = root.manual
         ? root.tr("tooltip.manual").arg(root.dutyPercent).arg(rpm).arg(temp)
         : root.tr("tooltip.auto").arg(rpm).arg(temp)
+      if (root.hasBattery) tip += "\n" + root.tr("tooltip.battery").arg(root.battery.percent).arg(root.battery.status)
+      return tip
     }
     onPressed: function(b) {
       if (b === Qt.RightButton) { if (root.manual) root.applyAuto() }
@@ -326,6 +431,31 @@ Panel {
         textFormat: Text.PlainText
         text: Model.formatTemp(root.cpuTempC)
         color: root.heatColor
+        font.family: button.fontFamily
+        font.pixelSize: Style.bar.iconFont
+        font.features: { "tnum": 1 }
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Item { visible: root.hasBattery; width: Style.space(8); height: 1 }
+
+      OpticalGlyph {
+        visible: root.hasBattery
+        width: Style.bar.iconCanvas
+        height: Style.bar.iconCanvas
+        text: root.batteryGlyph
+        fontFamily: button.fontFamily
+        fontSize: Style.bar.iconFont
+        paintedSize: Style.bar.iconSize
+        color: root.batteryColor
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Text {
+        visible: root.hasBattery
+        textFormat: Text.PlainText
+        text: root.battery.percent + "%"
+        color: root.batteryColor
         font.family: button.fontFamily
         font.pixelSize: Style.bar.iconFont
         font.features: { "tnum": 1 }
@@ -600,6 +730,250 @@ Panel {
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
+          }
+
+          // ---- battery ----
+          Rectangle {
+            visible: root.hasBattery
+            width: parent.width
+            height: 1
+            color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.15)
+          }
+
+          Item {
+            visible: root.hasBattery
+            width: parent.width
+            implicitHeight: batteryHeader.implicitHeight
+
+            Row {
+              id: batteryHeader
+              spacing: Style.space(8)
+
+              Text {
+                textFormat: Text.PlainText
+                text: root.batteryGlyph
+                color: root.batteryColor
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.icon
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                text: root.tr("battery.title")
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            Text {
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: root.battery.percent + "%"
+              color: root.batteryColor
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.icon
+              font.bold: true
+              font.features: { "tnum": 1 }
+            }
+          }
+
+          Rectangle {
+            visible: root.hasBattery
+            width: parent.width
+            height: Style.space(6)
+            radius: height / 2
+            color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.15)
+
+            Rectangle {
+              width: parent.width * root.battery.percent / 100
+              height: parent.height
+              radius: parent.radius
+              color: root.batteryColor
+            }
+          }
+
+          Grid {
+            visible: root.hasBattery
+            width: parent.width
+            columns: 2
+            columnSpacing: Style.space(16)
+            rowSpacing: Style.space(4)
+
+            Repeater {
+              model: [
+                { k: root.tr("battery.size"), v: Math.round(root.battery.sizeWh) + "Wh" },
+                { k: root.tr("battery.timeLeft"), v: Model.formatDuration(root.battery.minutes) },
+                { k: root.tr("battery.cycles"), v: String(root.battery.cycles) },
+                { k: root.tr("battery.status." + root.battery.status.toLowerCase()), v: Model.formatWatts(root.battery.watts) }
+              ]
+
+              Item {
+                width: (column.width - Style.space(16)) / 2
+                height: statLabel.implicitHeight
+
+                Text {
+                  id: statLabel
+                  textFormat: Text.PlainText
+                  text: modelData.k
+                  color: Qt.darker(root.barForeground, 1.4)
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  anchors.right: parent.right
+                  textFormat: Text.PlainText
+                  text: modelData.v
+                  color: root.barForeground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.features: { "tnum": 1 }
+                }
+              }
+            }
+          }
+
+          PanelSectionHeader {
+            visible: root.hasBattery && root.history.length > 1
+            width: parent.width
+            text: root.tr("battery.history")
+          }
+
+          Rectangle {
+            visible: root.hasBattery && root.history.length > 1
+            width: parent.width
+            height: Style.space(56)
+            radius: Style.space(6)
+            color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
+
+            Row {
+              anchors.fill: parent
+              anchors.margins: Style.space(6)
+              anchors.bottomMargin: Style.space(20)
+              spacing: 1
+
+              Repeater {
+                model: Model.historyBuckets(root.history, 40)
+
+                Item {
+                  width: (parent.width - 39) / 40
+                  height: parent.height
+
+                  Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    height: Math.max(1, parent.height * modelData / 100)
+                    color: root.barForeground
+                  }
+                }
+              }
+            }
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              anchors.bottom: parent.bottom
+              anchors.bottomMargin: Style.space(4)
+              textFormat: Text.PlainText
+              text: Model.historySummary(root.history)
+              color: root.barForeground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+          }
+
+          PanelSectionHeader {
+            visible: root.consumers.length > 0
+            width: parent.width
+            text: root.tr("battery.consumers")
+          }
+
+          Column {
+            visible: root.consumers.length > 0
+            width: parent.width
+            spacing: Style.space(4)
+
+            Repeater {
+              model: root.consumers
+
+              Item {
+                width: parent.width
+                height: consumerName.implicitHeight
+
+                Text {
+                  id: consumerName
+                  width: parent.width * 0.4
+                  elide: Text.ElideRight
+                  textFormat: Text.PlainText
+                  text: modelData.name
+                  color: root.barForeground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Text {
+                  x: parent.width * 0.4
+                  width: parent.width * 0.18
+                  horizontalAlignment: Text.AlignRight
+                  textFormat: Text.PlainText
+                  text: modelData.cpu.toFixed(1) + "%"
+                  color: root.barForeground
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.features: { "tnum": 1 }
+                }
+
+                Rectangle {
+                  x: parent.width * 0.6
+                  width: parent.width * 0.4
+                  height: parent.height - 4
+                  anchors.verticalCenter: parent.verticalCenter
+                  color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.12)
+
+                  Rectangle {
+                    width: parent.width * Math.min(1, modelData.cpu / Math.max(1, root.consumers[0].cpu))
+                    height: parent.height
+                    color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.55)
+                  }
+                }
+              }
+            }
+          }
+
+          PanelSectionHeader {
+            visible: root.powerProfile !== ""
+            width: parent.width
+            text: root.tr("battery.profile")
+          }
+
+          Row {
+            visible: root.powerProfile !== ""
+            spacing: Style.space(8)
+
+            Button {
+              text: root.tr("profile.powerSaver")
+              selected: root.powerProfile === "power-saver"
+              onClicked: root.setPowerProfile("power-saver")
+            }
+
+            Button {
+              text: root.tr("profile.balanced")
+              selected: root.powerProfile === "balanced"
+              onClicked: root.setPowerProfile("balanced")
+            }
+
+            Button {
+              text: root.tr("profile.performance")
+              selected: root.powerProfile === "performance"
+              onClicked: root.setPowerProfile("performance")
+            }
           }
 
           Text {

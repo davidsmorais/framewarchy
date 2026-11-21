@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.davidsmorais.omarchy-framework-fan-control",
-  "name": "Framework Fan Control",
+  "id": "io.github.davidsmorais.framewarchy",
+  "name": "Framewarchy",
   "version": "0.1.0",
   "author": "David Morais",
   "license": "MIT",
