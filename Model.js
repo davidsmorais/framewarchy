@@ -269,3 +269,33 @@ function historySummary(list) {
   var span = (list[list.length - 1].t - list[0].t) / 60000
   return lo + "–" + hi + "% over " + formatDuration(span) + " · now " + list[list.length - 1].p + "%"
 }
+
+// ---- charge window -----------------------------------------------------
+
+var CHARGE_STOP_DEFAULT = 99
+var CHARGE_START_DEFAULT = 85
+
+// Keep stop in 60..99 and start in 20..stop-1.
+function clampChargeWindow(stop, start) {
+  var s = Math.round(Number(stop))
+  if (!isFinite(s)) s = CHARGE_STOP_DEFAULT
+  s = Math.max(60, Math.min(99, s))
+  var t = Math.round(Number(start))
+  if (!isFinite(t)) t = CHARGE_START_DEFAULT
+  t = Math.max(20, Math.min(s - 1, t))
+  return { stop: s, start: t }
+}
+
+// The helper's charge.json. Anything unreadable is a disabled window at the defaults.
+function parseCharge(text) {
+  var out = { enabled: false, stop: CHARGE_STOP_DEFAULT, start: CHARGE_START_DEFAULT, holding: false }
+  try {
+    var c = JSON.parse(String(text))
+    var w = clampChargeWindow(c.stopPercent, c.startPercent)
+    out.stop = w.stop
+    out.start = w.start
+    out.enabled = c.enabled === true
+    out.holding = c.holding === true
+  } catch (e) {}
+  return out
+}

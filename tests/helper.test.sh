@@ -42,6 +42,7 @@ case "$1" in
       printf '  %s      %-5s %-5s  %-5s  %-7s %-9s sensor-%s\n' "$sid" "$warn" "$high" "$halt" "$off" "$max" "$sid"
     done < "$(dirname -- "$0")/thresholds"
     ;;
+  chargecontrol) echo "Charge mode set to $2." ;;
   *) echo "unexpected command: $*" >&2; exit 1 ;;
 esac
 EOF
@@ -174,6 +175,48 @@ contains '"mode":"manual"' "$state";      check "curve in manual: mode kept" $?
 contains '"dutyPercent":60' "$state";     check "curve in manual: duty kept" $?
 "$helper" curve stock >/dev/null 2>&1
 "$helper" auto >/dev/null 2>&1
+
+# ---- battery charge window -----------------------------------------------
+power=$work/power
+mkdir -p "$power/BAT1" "$power/AC"
+echo Battery > "$power/BAT1/type"
+echo Mains   > "$power/AC/type"
+export OMARCHY_FANCTL_POWER_ROOT=$power
+set_bat() { echo "$1" > "$power/BAT1/capacity"; : > "$work/bin/ectool.log"; }
+
+set_bat 90
+"$helper" charge limit 99 85 >/dev/null 2>&1;  check "charge limit 99 85: exit 0" $?
+contains '"enabled":true' "$(cat "$OMARCHY_FANCTL_STATE_DIR/charge.json")"; check "charge: window recorded" $?
+log_has "chargecontrol normal";                check "charge: 90% below stop keeps charging" $?
+set_bat 99
+"$helper" charge tick >/dev/null 2>&1
+log_has "chargecontrol idle";                  check "charge: 99% reaches stop, charging disabled" $?
+contains '"holding":true' "$(cat "$OMARCHY_FANCTL_STATE_DIR/charge.json")"; check "charge: holding recorded" $?
+set_bat 92
+"$helper" charge tick >/dev/null 2>&1
+log_has "chargecontrol idle";                  check "charge: 92% between thresholds stays disabled" $?
+set_bat 85
+"$helper" charge tick >/dev/null 2>&1
+log_has "chargecontrol normal";                check "charge: 85% reaches start, charging resumes" $?
+contains '"holding":false' "$(cat "$OMARCHY_FANCTL_STATE_DIR/charge.json")"; check "charge: holding cleared" $?
+set_bat 92
+"$helper" charge tick >/dev/null 2>&1
+log_has "chargecontrol normal";                check "charge: 92% between thresholds keeps charging" $?
+
+before=$(cat "$work/bin/ectool.log")
+"$helper" charge limit 99 99 >/dev/null 2>&1;  [ $? -ne 0 ]; check "charge: start must be below stop" $?
+"$helper" charge limit 100 85 >/dev/null 2>&1; [ $? -ne 0 ]; check "charge: stop above 99 rejected" $?
+"$helper" charge limit 50 40 >/dev/null 2>&1;  [ $? -ne 0 ]; check "charge: stop below 60 rejected" $?
+"$helper" charge limit 90 10 >/dev/null 2>&1;  [ $? -ne 0 ]; check "charge: start below 20 rejected" $?
+"$helper" charge limit a b >/dev/null 2>&1;    [ $? -ne 0 ]; check "charge: non-numeric rejected" $?
+[ "$before" = "$(cat "$work/bin/ectool.log")" ]; check "charge: rejected windows never reach ectool" $?
+
+set_bat 99
+"$helper" charge off >/dev/null 2>&1;          check "charge off: exit 0" $?
+log_has "chargecontrol normal";                check "charge off: charging restored" $?
+: > "$work/bin/ectool.log"
+"$helper" charge tick >/dev/null 2>&1
+[ ! -s "$work/bin/ectool.log" ];               check "charge tick: no-op when disabled" $?
 
 # ---- a state file from an earlier boot means automatic ------------------
 printf '{"protocolVersion":1,"mode":"manual","dutyPercent":40,"bootId":"stale-boot","updated":1}\n' \

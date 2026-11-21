@@ -34,5 +34,13 @@
   "battery.profile": "Perfil de energia",
   "profile.powerSaver": "Poupança",
   "profile.balanced": "Equilibrado",
-  "profile.performance": "Desempenho"
+  "profile.performance": "Desempenho",
+  "section.preserve": "Preservar a bateria",
+  "charge.toggle": "Limitar carregamento",
+  "charge.description": "Desativa o carregamento entre os dois níveis",
+  "charge.stop": "Parar de carregar em",
+  "charge.start": "Voltar a carregar em",
+  "charge.holding": "Carregamento pausado até %1%",
+  "charge.active": "A carregar até %1%",
+  "charge.needsSetup": "Requer o helper: sudo ./setup install"
 }

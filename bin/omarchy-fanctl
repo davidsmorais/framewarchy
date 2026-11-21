@@ -6,8 +6,8 @@
 # sysfs, but no PWM control: /dev/cros_ec is root-only, so the fan duty is set
 # with ectool (EC_CMD_PWM_SET_FAN_DUTY / EC_CMD_THERMAL_AUTO_FAN_CTRL). The
 # shell plugin runs this helper through a sudoers whitelist that permits
-# exactly `auto`, `manual 10..100`, `curve <preset>` and `curves` — nothing else
-# executes as root.
+# exactly `auto`, `manual 10..100`, `curve <preset>`, `curves`,
+# `charge limit <stop> <start>` and `charge off` — nothing else executes as root.
 #
 # Every successful control command rewrites state.json (world-readable)
 # recording the mode, the boot id, and the duty, so the plugin can read the
@@ -17,15 +17,20 @@
 # Testing: OMARCHY_FANCTL_TEST_ROOT replaces /sys/class/hwmon,
 # OMARCHY_FANCTL_STATE_DIR replaces the state directory, a fake `ectool` on
 # PATH stands in for the real one, and OMARCHY_FANCTL_ALLOW_UNPRIVILEGED=1
-# lifts the root check so the test suite can drive `auto`/`manual`.
+# lifts the root check so the test suite can drive `auto`/`manual`, and
+# OMARCHY_FANCTL_POWER_ROOT replaces /sys/class/power_supply.
 
 set -euo pipefail
 
 readonly PROTOCOL_VERSION=1
 readonly DEFAULT_HWMON_ROOT=/sys/class/hwmon
+readonly DEFAULT_POWER_ROOT=/sys/class/power_supply
 readonly DEFAULT_STATE_DIR=/var/lib/omarchy-fanctl
 readonly MIN_DUTY=10
 readonly MAX_DUTY=100
+readonly MIN_STOP=60
+readonly MAX_STOP=99
+readonly MIN_START=20
 
 fail() {
   printf 'omarchy-fanctl: %s\n' "$*" >&2
@@ -236,12 +241,99 @@ cmd_curves() {
   printf '{"protocolVersion":%d,"curve":"%s"}\n' "$PROTOCOL_VERSION" "$match"
 }
 
+# ---- battery charge window -----------------------------------------------
+# `charge limit <stop> <start>` records a window in charge.json; `charge tick`
+# (run every 30 s by omarchy-fanctl-charge.timer, as root) enforces it with
+# ectool chargecontrol: charging is disabled (idle — the laptop runs from AC)
+# once the battery reaches <stop>, and stays disabled until it falls to
+# <start>. Between the two the previous decision holds, so the pack never
+# trickles. `charge off` removes the window and lets the EC charge normally.
+power_root() { printf '%s\n' "${OMARCHY_FANCTL_POWER_ROOT:-$DEFAULT_POWER_ROOT}"; }
+charge_file() { printf '%s/charge.json\n' "$(state_dir)"; }
+
+read_charge_field() {
+  local key=$1 text
+  text=$(cat "$(charge_file)" 2>/dev/null) || return 1
+  printf '%s' "$text" | grep -o "\"$key\":[^,}]*" | head -1 | sed 's/^"[^"]*"://; s/"//g'
+}
+
+write_charge() { # write_charge <enabled true|false> <stop> <start> <holding true|false>
+  mkdir -p -- "$(state_dir)"
+  local file; file=$(charge_file)
+  printf '{"protocolVersion":%d,"enabled":%s,"stopPercent":%d,"startPercent":%d,"holding":%s,"updated":%d}\n' \
+    "$PROTOCOL_VERSION" "$1" "$2" "$3" "$4" "$(date +%s)" > "$file.tmp"
+  chmod 0644 "$file.tmp"
+  mv -f "$file.tmp" "$file"
+}
+
+battery_percent() {
+  local dir type value
+  for dir in "$(power_root)"/*; do
+    [[ -r $dir/type ]] || continue
+    IFS= read -r type < "$dir/type" || continue
+    [[ $type == Battery ]] || continue
+    value=$(read_number "$dir/capacity") || continue
+    printf '%s\n' "$value"
+    return 0
+  done
+  return 1
+}
+
+cmd_charge_limit() {
+  local stop=$1 start=$2
+  [[ $stop =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "stop and start must be integer percents"
+  (( stop >= MIN_STOP && stop <= MAX_STOP )) || fail "stop must be between $MIN_STOP and $MAX_STOP"
+  (( start >= MIN_START && start < stop )) || fail "start must be between $MIN_START and stop-1"
+  require_root
+  write_charge true "$stop" "$start" false
+  cmd_charge_tick
+}
+
+cmd_charge_off() {
+  local stop start
+  require_root
+  stop=$(read_charge_field stopPercent || true); [[ $stop =~ ^[0-9]+$ ]] || stop=99
+  start=$(read_charge_field startPercent || true); [[ $start =~ ^[0-9]+$ ]] || start=85
+  run_ectool chargecontrol normal >/dev/null
+  write_charge false "$stop" "$start" false
+  printf 'charge limit disabled\n'
+}
+
+cmd_charge_tick() {
+  local stop start holding percent
+  [[ $(read_charge_field enabled || true) == true ]] || return 0
+  require_root
+  stop=$(read_charge_field stopPercent) && [[ $stop =~ ^[0-9]+$ ]] || return 0
+  start=$(read_charge_field startPercent) && [[ $start =~ ^[0-9]+$ ]] || return 0
+  holding=$(read_charge_field holding || true)
+  percent=$(battery_percent) || return 0
+  if (( percent >= stop )); then holding=true
+  elif (( percent <= start )); then holding=false
+  fi
+  [[ $holding == true ]] || holding=false
+  if [[ $holding == true ]]; then run_ectool chargecontrol idle >/dev/null
+  else run_ectool chargecontrol normal >/dev/null
+  fi
+  write_charge true "$stop" "$start" "$holding"
+  printf 'battery %d%%: charging %s\n' "$percent" "$([[ $holding == true ]] && echo disabled || echo enabled)"
+}
+
+cmd_charge() {
+  case ${1:-} in
+    limit) [[ -n ${2:-} && -n ${3:-} ]] || fail "usage: omarchy-fanctl charge limit <stop> <start>"; cmd_charge_limit "$2" "$3" ;;
+    off)   cmd_charge_off ;;
+    tick)  cmd_charge_tick ;;
+    *)     fail "usage: omarchy-fanctl charge <limit STOP START|off>" ;;
+  esac
+}
+
 case ${1:-} in
   status)  cmd_status ;;
   auto)    cmd_auto ;;
   manual)  [[ -n ${2:-} ]] || fail "usage: omarchy-fanctl manual <10..100>"; cmd_manual "$2" ;;
   curve)   [[ -n ${2:-} ]] || fail "usage: omarchy-fanctl curve <stock|quiet|silent>"; cmd_curve "$2" ;;
   curves)  cmd_curves ;;
+  charge)  shift; cmd_charge "$@" ;;
   version) printf 'omarchy-fanctl protocol %d\n' "$PROTOCOL_VERSION" ;;
-  *)       printf 'usage: omarchy-fanctl <status|auto|manual 10..100|curve stock|quiet|silent|curves|version>\n' >&2; exit 1 ;;
+  *)       printf 'usage: omarchy-fanctl <status|auto|manual 10..100|curve stock|quiet|silent|curves|charge limit STOP START|charge off|version>\n' >&2; exit 1 ;;
 esac

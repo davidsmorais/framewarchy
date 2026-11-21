@@ -68,6 +68,11 @@ Panel {
   property var history: []
   property var consumers: []
   property string powerProfile: ""
+  // Charge window: charging is disabled between stop and start (helper + timer enforce it).
+  property bool chargeLimitOn: false
+  property bool chargeHolding: false
+  property int chargeStop: Model.CHARGE_STOP_DEFAULT
+  property int chargeStart: Model.CHARGE_START_DEFAULT
   readonly property bool hasBattery: found.batPath !== "" && battery.present
   readonly property string batteryLevel: Model.batteryLevel(battery.percent, battery.status)
   readonly property color batteryColor: batteryLevel === "charging" ? Commons.Color.accent
@@ -153,6 +158,19 @@ Panel {
     onLoaded: root.history = Model.parseHistory(text())
   }
 
+  FileView {
+    id: chargeFile
+    path: "/var/lib/omarchy-fanctl/charge.json"
+    blockLoading: true
+    printErrors: false
+    onLoaded: {
+      var c = Model.parseCharge(text())
+      root.chargeLimitOn = c.enabled
+      root.chargeHolding = c.holding
+      if (!root.chargeDragging) { root.chargeStop = c.stop; root.chargeStart = c.start }
+    }
+  }
+
   FileView { id: bootFile; path: "/proc/sys/kernel/random/boot_id"; blockLoading: true; printErrors: false }
 
   // Presence checks for the privileged helper and ectool.
@@ -168,6 +186,7 @@ Panel {
       tempFile.reload()
       stateFile.reload()
       batFile.reload()
+      chargeFile.reload()
     }
   }
 
@@ -233,6 +252,38 @@ Panel {
   Process {
     id: profileSetProc
     onExited: profileGetProc.running = true
+  }
+
+  // ---- battery charge window --------------------------------------------
+  property bool chargeDragging: false
+
+  function applyChargeLimit() {
+    if (!helperOk || !ectoolOk) return
+    var w = Model.clampChargeWindow(chargeStop, chargeStart)
+    chargeStop = w.stop
+    chargeStart = w.start
+    errorText = ""
+    chargeProc.command = ["sudo", "-n", "/usr/local/libexec/omarchy-fanctl", "charge", "limit", String(w.stop), String(w.start)]
+    chargeProc.running = true
+  }
+
+  function setChargeLimit(on) {
+    chargeLimitOn = on
+    if (on) { applyChargeLimit(); return }
+    if (!helperOk || !ectoolOk) return
+    errorText = ""
+    chargeProc.command = ["sudo", "-n", "/usr/local/libexec/omarchy-fanctl", "charge", "off"]
+    chargeProc.running = true
+  }
+
+  Process {
+    id: chargeProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.errorText = text.trim()
+    }
+    onExited: chargeFile.reload()
   }
 
   // ---- controlling the fan ----------------------------------------------
@@ -972,6 +1023,91 @@ Panel {
               text: root.tr("profile.performance")
               selected: root.powerProfile === "performance"
               onClicked: root.setPowerProfile("performance")
+            }
+          }
+
+          // ---- preserve battery life ----
+          PanelSectionHeader {
+            visible: root.hasBattery
+            width: parent.width
+            text: root.tr("section.preserve")
+          }
+
+          Toggle {
+            visible: root.hasBattery
+            width: parent.width
+            label: root.tr("charge.toggle")
+            description: !(root.helperOk && root.ectoolOk) ? root.tr("charge.needsSetup")
+              : root.chargeLimitOn
+                ? (root.chargeHolding ? root.tr("charge.holding").arg(root.chargeStart) : root.tr("charge.active").arg(root.chargeStop))
+                : root.tr("charge.description")
+            checked: root.chargeLimitOn
+            enabled: root.helperOk && root.ectoolOk
+            foreground: root.barForeground
+            fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            onClicked: root.setChargeLimit(!root.chargeLimitOn)
+          }
+
+          Repeater {
+            model: root.hasBattery && root.chargeLimitOn ? [
+              { key: "stop", label: root.tr("charge.stop"), min: 60 },
+              { key: "start", label: root.tr("charge.start"), min: 20 }
+            ] : []
+
+            Row {
+              width: column.width
+              spacing: Style.space(8)
+
+              Text {
+                id: chargeRowLabel
+                width: Style.space(120)
+                anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
+                text: modelData.label
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              PanelSlider {
+                width: parent.width - chargeRowLabel.width - chargeRowValue.width - parent.spacing * 2
+                anchors.verticalCenter: parent.verticalCenter
+                bar: root.bar
+                minimum: modelData.min
+                maximum: modelData.key === "stop" ? 99 : Math.max(21, root.chargeStop - 1)
+                step: 1
+                integer: true
+                value: modelData.key === "stop" ? root.chargeStop : root.chargeStart
+                onMoved: function(v) {
+                  root.chargeDragging = true
+                  var w = modelData.key === "stop" ? Model.clampChargeWindow(v, root.chargeStart)
+                                                   : Model.clampChargeWindow(root.chargeStop, v)
+                  root.chargeStop = w.stop
+                  root.chargeStart = w.start
+                }
+                onReleased: function(v) {
+                  var w = modelData.key === "stop" ? Model.clampChargeWindow(v, root.chargeStart)
+                                                   : Model.clampChargeWindow(root.chargeStop, v)
+                  root.chargeStop = w.stop
+                  root.chargeStart = w.start
+                  root.chargeDragging = false
+                  root.applyChargeLimit()
+                }
+              }
+
+              Text {
+                id: chargeRowValue
+                width: Style.space(36)
+                anchors.verticalCenter: parent.verticalCenter
+                horizontalAlignment: Text.AlignRight
+                textFormat: Text.PlainText
+                text: (modelData.key === "stop" ? root.chargeStop : root.chargeStart) + "%"
+                color: root.barForeground
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.features: { "tnum": 1 }
+              }
             }
           }
 

@@ -32,6 +32,12 @@ embedded controller's automatic control and a manual duty cycle.
   left, charge cycles, live power draw, a 48 h charge history, the top CPU
   consumers, and a Power-saver / Balanced / Performance profile switch
   (`powerprofilesctl`).
+- **Preserve battery life**: a toggle that disables charging between two
+  levels — *Stop charging at* (default 99 %) and *Start charging at*
+  (default 85 %). Once the battery reaches the stop level charging stays off
+  (`ectool chargecontrol idle`) until it drains to the start level. A root
+  systemd timer (`omarchy-fanctl-charge.timer`, every 30 s) enforces it, so it
+  works with the shell closed. Turning it off restores normal charging.
 - Panel keys: `1`/`2`/`3` presets, `A` automatic, `Esc` closes.
 - Monitoring (RPM, CPU temp, current mode) is read straight from hwmon
   sysfs and a world-readable state file — no process per reading.
@@ -64,13 +70,16 @@ omarchy bar move io.github.davidsmorais.framewarchy --section right
 `setup install` copies the root-owned helper to
 `/usr/local/libexec/omarchy-fanctl`, creates `/var/lib/omarchy-fanctl/`
 (state, world-readable), installs a sudoers rule allowing **only**
-`omarchy-fanctl auto` and `omarchy-fanctl manual 10..100`, and installs a
-systemd suspend hook. Nothing goes into `/usr/share/omarchy/`.
+`omarchy-fanctl auto`, `manual 10..100`, `curve …`, `charge off` and
+`charge limit NN NN`, and installs a systemd suspend hook and the charge
+timer. Nothing goes into `/usr/share/omarchy/`.
 
 ## Safety
 
 - The sudoers whitelist is enumerated: `auto`, the eleven valid duties,
-  `curve stock|quiet|silent` and `curves` — nothing else. The helper
+  `curve stock|quiet|silent`, `curves`, `charge off` and
+  `charge limit NN NN` (two-digit percents, range-checked by the helper:
+  stop 60–99, start 20..stop−1) — nothing else. The helper
   re-validates every value itself, so a bad value fails twice.
 - Curve presets only shift each sensor's `fan_off`/`fan_max`; warn, high
   and halt stay at stock values, and the battery sensor is skipped.

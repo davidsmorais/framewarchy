@@ -104,5 +104,15 @@ check("historySummary", historySummary([{ t: 0, p: 2 }, { t: 60000, p: 92 }]) ==
 check("historyBuckets: count", historyBuckets([{ t: 0, p: 10 }, { t: 100, p: 20 }], 4).length === 4)
 check("parseDiscovery: bat path", parseDiscovery("bat=/x/uevent").batPath === "/x/uevent")
 
+// ---- charge window ----
+check("clampChargeWindow: defaults pass through", JSON.stringify(clampChargeWindow(99, 85)) === '{"stop":99,"start":85}')
+check("clampChargeWindow: stop capped at 99", clampChargeWindow(100, 85).stop === 99)
+check("clampChargeWindow: start kept below stop", clampChargeWindow(70, 90).start === 69)
+check("clampChargeWindow: start floored at 20", clampChargeWindow(80, 5).start === 20)
+check("clampChargeWindow: NaN falls back to defaults", JSON.stringify(clampChargeWindow("x", "y")) === '{"stop":99,"start":85}')
+const ch = parseCharge('{"enabled":true,"stopPercent":90,"startPercent":80,"holding":true}')
+check("parseCharge: reads window", ch.enabled && ch.stop === 90 && ch.start === 80 && ch.holding)
+check("parseCharge: garbage is disabled defaults", !parseCharge("nope").enabled && parseCharge("nope").stop === 99)
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

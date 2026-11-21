@@ -11,7 +11,9 @@
 #                                         control and remove everything else
 #
 # The sudoers rule permits exactly `auto`, `manual 10..100` (step 10),
-# `curve stock|quiet|silent` and `curves` on the root-owned helper — the shell never gets anything else as root.
+# `curve stock|quiet|silent`, `curves`, `charge off` and `charge limit NN NN`
+# (two-digit percents, range-checked again by the helper) on the root-owned
+# helper — the shell never gets anything else as root.
 
 set -euo pipefail
 
@@ -19,6 +21,8 @@ readonly HELPER=/usr/local/libexec/omarchy-fanctl
 readonly SUDOERS_PREFIX=/etc/sudoers.d/omarchy-fanctl
 readonly SLEEP_HOOK=/usr/lib/systemd/system-sleep/omarchy-fanctl
 readonly STATE_DIR=/var/lib/omarchy-fanctl
+readonly CHARGE_SERVICE=/etc/systemd/system/omarchy-fanctl-charge.service
+readonly CHARGE_TIMER=/etc/systemd/system/omarchy-fanctl-charge.timer
 readonly SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 fail() {
@@ -71,6 +75,8 @@ write_sudoers() {
       printf ', %s curve %s' "$HELPER" "$name"
     done
     printf ', %s curves' "$HELPER"
+    printf ', %s charge off' "$HELPER"
+    printf ', %s charge limit [0-9][0-9] [0-9][0-9]' "$HELPER"
     printf '\n'
   } > "$temporary"
   chmod 0440 "$temporary"
@@ -86,6 +92,34 @@ seed_state() {
   chmod 0644 "$STATE_DIR/state.json"
 }
 
+# The timer enforces the charge window as root, so it keeps working while the
+# shell is closed. `charge tick` does nothing unless a window is enabled.
+install_charge_timer() {
+  cat > "$CHARGE_SERVICE" <<UNIT
+[Unit]
+Description=Framewarchy battery charge window
+
+[Service]
+Type=oneshot
+ExecStart=$HELPER charge tick
+UNIT
+  cat > "$CHARGE_TIMER" <<'UNIT'
+[Unit]
+Description=Framewarchy battery charge window
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
+UNIT
+  chmod 0644 "$CHARGE_SERVICE" "$CHARGE_TIMER"
+  systemctl daemon-reload
+  systemctl enable --now omarchy-fanctl-charge.timer >/dev/null 2>&1 || printf 'setup: WARNING could not enable the charge timer\n' >&2
+}
+
 install_all() {
   /usr/bin/install -d -o root -g root -m 0755 /usr/local/libexec
   /usr/bin/install -o root -g root -m 0755 "$SOURCE_DIR/bin/omarchy-fanctl" "$HELPER"
@@ -93,12 +127,13 @@ install_all() {
   write_sudoers
   /usr/bin/install -d -o root -g root -m 0755 "$(dirname -- "$SLEEP_HOOK")"
   /usr/bin/install -o root -g root -m 0755 "$SOURCE_DIR/sleep/omarchy-fanctl" "$SLEEP_HOOK"
-  printf 'Installed helper, sudo rule for %s, state dir and suspend hook\n' "$target_user"
+  install_charge_timer
+  printf 'Installed helper, sudo rule for %s, state dir, charge timer and suspend hook\n' "$target_user"
 }
 
 show_status() {
   local piece
-  for piece in "$HELPER" "$STATE_DIR/state.json" "$sudoers_file" "$SLEEP_HOOK"; do
+  for piece in "$HELPER" "$STATE_DIR/state.json" "$sudoers_file" "$SLEEP_HOOK" "$CHARGE_TIMER"; do
     if [[ -e $piece ]]; then printf 'present  %s\n' "$piece"; else printf 'missing  %s\n' "$piece"; fi
   done
   [[ -f $sudoers_file ]] && /usr/sbin/visudo -cf "$sudoers_file" >/dev/null && printf 'sudo rule validates\n'
@@ -135,6 +170,13 @@ uninstall_all() {
       fail "could not restore automatic fan control; nothing was removed. Fix the error above, or pass --force to remove anyway"
     fi
   fi
+  # Release the charge window so the battery charges normally again.
+  if [[ -x $HELPER ]] && grep -Fq '"enabled":true' "$STATE_DIR/charge.json" 2>/dev/null; then
+    "$HELPER" charge off || printf 'setup: WARNING could not re-enable battery charging\n' >&2
+  fi
+  systemctl disable --now omarchy-fanctl-charge.timer >/dev/null 2>&1 || true
+  rm -f -- "$CHARGE_SERVICE" "$CHARGE_TIMER"
+  systemctl daemon-reload 2>/dev/null || true
   rm -f -- "$sudoers_file" "$HELPER" "$SLEEP_HOOK"
   rm -rf -- "$STATE_DIR"
   printf 'Removed helper, sudo rule, suspend hook and state for %s\n' "$target_user"

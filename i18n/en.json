@@ -34,5 +34,13 @@
   "battery.profile": "Power profile",
   "profile.powerSaver": "Power-saver",
   "profile.balanced": "Balanced",
-  "profile.performance": "Performance"
+  "profile.performance": "Performance",
+  "section.preserve": "Preserve battery life",
+  "charge.toggle": "Limit battery charging",
+  "charge.description": "Disables charging between the two levels",
+  "charge.stop": "Stop charging at",
+  "charge.start": "Start charging at",
+  "charge.holding": "Charging paused until %1%",
+  "charge.active": "Charging until %1%",
+  "charge.needsSetup": "Needs the helper: sudo ./setup install"
 }
