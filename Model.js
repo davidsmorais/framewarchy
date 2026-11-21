@@ -18,7 +18,7 @@ function parseDiscovery(text) {
 // The helper's state.json plus the current boot id. A state file from an
 // earlier boot describes a duty the EC has forgotten: report automatic.
 function parseState(text, bootId) {
-  var out = { mode: "auto", dutyPercent: 0 }
+  var out = { mode: "auto", dutyPercent: 0, curve: "stock" }
   try {
     var state = JSON.parse(String(text))
     if (state.bootId && bootId && String(state.bootId) !== String(bootId).trim()) return out
@@ -27,8 +27,20 @@ function parseState(text, bootId) {
       var duty = Number(state.dutyPercent)
       out.dutyPercent = isFinite(duty) ? clampDuty(duty, 0) : 0
     }
+    if (state.curve === "quiet" || state.curve === "silent") out.curve = state.curve
   } catch (e) { /* unreadable state means automatic */ }
   return out
+}
+
+// The helper's `curves` JSON: which preset the EC is actually running.
+// "custom" means thresholds that match no preset; "unknown" means the
+// read failed and the caller should keep whatever it already shows.
+function parseCurves(text) {
+  try {
+    var curve = String(JSON.parse(String(text)).curve)
+    if (curve === "stock" || curve === "quiet" || curve === "silent" || curve === "custom") return curve
+  } catch (e) {}
+  return "unknown"
 }
 
 // "/sys/.../fan1_input" holds a bare integer RPM; anything else is 0.

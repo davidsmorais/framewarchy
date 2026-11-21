@@ -61,6 +61,7 @@ Panel {
   property string errorText: ""
   property bool applying: false
   property bool dragging: false
+  property string curve: "stock"
 
   readonly property bool available: found.fanPath !== ""
   // Reading an installed binary as text only answers "is it here": search
@@ -70,7 +71,11 @@ Panel {
   readonly property bool controllable: available && helperOk && ectoolOk
   readonly property bool manual: mode === "manual"
 
-  onOpenedChanged: if (opened) discoverProc.running = true
+  onOpenedChanged: {
+    if (!opened) return
+    discoverProc.running = true
+    curvesProc.running = true
+  }
 
   // ---- finding the sensors ---------------------------------------------
   Process {
@@ -109,6 +114,7 @@ Panel {
       var s = Model.parseState(text(), bootFile.text())
       root.mode = s.mode
       root.dutyPercent = s.dutyPercent
+      root.curve = s.curve
       if (s.mode === "manual" && !root.dragging) root.stagedPercent = s.dutyPercent
     }
   }
@@ -168,6 +174,58 @@ Panel {
     }
   }
 
+  // ---- shaping the automatic curve ---------------------------------------
+  // The EC's own thermal thresholds decide when automatic mode ramps the
+  // fan. Presets shift the ramp (never the warn/critical thresholds), the
+  // EC resets to stock on full power-off, and the widget takes its truth
+  // from `curves` — a thermalget read — rather than the state file.
+  function applyCurve(name) {
+    if (!controllable || applying) return
+    if (name !== "stock" && name !== "quiet" && name !== "silent") return
+    errorText = ""
+    applying = true
+    curve = name
+    curveProc.command = ["sudo", "-n", "/usr/local/libexec/omarchy-fanctl", "curve", name]
+    curveProc.running = true
+  }
+
+  Process {
+    id: curveProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.errorText = text.trim()
+    }
+    onExited: function(code) {
+      root.applying = false
+      if (code === 0) {
+        stateFile.reload()
+        curvesProc.running = true
+      }
+    }
+  }
+
+  Process {
+    id: curvesProc
+    command: ["sudo", "-n", "/usr/local/libexec/omarchy-fanctl", "curves"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var read = Model.parseCurves(text)
+        if (read !== "unknown") root.curve = read
+      }
+    }
+    stderr: StdioCollector { waitForEnd: true }
+  }
+
+  // Once the presence checks have loaded, ask the EC which curve is live.
+  Timer {
+    interval: 800
+    running: true
+    repeat: false
+    onTriggered: if (root.helperOk && root.ectoolOk) curvesProc.running = true
+  }
+
   // ---- IPC ---------------------------------------------------------------
   IpcHandler {
     target: "io.github.davidsmorais.omarchy-framework-fan-control"
@@ -177,6 +235,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function auto(): void { root.applyAuto() }
     function manual(percent: int): void { root.applyManual(percent) }
+    function curve(name: string): void { root.applyCurve(name) }
     function state(): string {
       return JSON.stringify({
         available: root.available,
@@ -184,6 +243,7 @@ Panel {
         mode: root.mode,
         dutyPercent: root.dutyPercent,
         stagedPercent: root.stagedPercent,
+        curve: root.curve,
         rpm: root.rpmValue,
         cpuTempC: root.cpuTempC,
         error: root.errorText
@@ -407,6 +467,47 @@ Panel {
               enabled: root.controllable && !root.applying
               onClicked: root.applyManual(root.stagedPercent)
             }
+          }
+
+          // ---- automatic curve ----
+          PanelSectionHeader {
+            width: parent.width
+            text: root.tr("section.curve")
+          }
+
+          Row {
+            spacing: Style.space(8)
+
+            Button {
+              text: root.tr("curve.stock")
+              selected: root.curve === "stock"
+              enabled: root.controllable && !root.applying
+              onClicked: root.applyCurve("stock")
+            }
+
+            Button {
+              text: root.tr("curve.quiet")
+              selected: root.curve === "quiet"
+              enabled: root.controllable && !root.applying
+              onClicked: root.applyCurve("quiet")
+            }
+
+            Button {
+              text: root.tr("curve.silent")
+              selected: root.curve === "silent"
+              enabled: root.controllable && !root.applying
+              onClicked: root.applyCurve("silent")
+            }
+          }
+
+          Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.tr("hint.curve")
+            color: Qt.darker(root.barForeground, 1.4)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           // ---- presets ----

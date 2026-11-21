@@ -34,6 +34,18 @@ check("parseState: boot id with surrounding whitespace trimmed", parseState(stat
 check("parseState: auto mode stays auto", parseState(JSON.stringify({ mode: "auto", dutyPercent: 0, bootId: "b" }), "b").mode === "auto")
 check("parseState: broken json is auto", parseState("not json {", "b").mode === "auto")
 check("parseState: markup-shaped state is auto", parseState('<img src="x">', "b").mode === "auto")
+check("parseState: curve default is stock", parseState(state, "boot-1").curve === "stock")
+check("parseState: quiet curve read back", parseState(JSON.stringify({ mode: "auto", curve: "quiet", bootId: "b" }), "b").curve === "quiet")
+check("parseState: silent curve read back", parseState(JSON.stringify({ mode: "manual", dutyPercent: 40, curve: "silent", bootId: "b" }), "b").curve === "silent")
+check("parseState: unknown curve is stock", parseState(JSON.stringify({ mode: "auto", curve: "<img>", bootId: "b" }), "b").curve === "stock")
+
+// ---- parseCurves ----
+check("parseCurves: quiet", parseCurves('{"protocolVersion":1,"curve":"quiet"}') === "quiet")
+check("parseCurves: silent", parseCurves('{"curve":"silent"}') === "silent")
+check("parseCurves: custom", parseCurves('{"curve":"custom"}') === "custom")
+check("parseCurves: broken json is unknown", parseCurves("not json") === "unknown")
+check("parseCurves: unexpected value is unknown", parseCurves('{"curve":"<img>"}') === "unknown")
+check("parseCurves: markup-shaped input is unknown", parseCurves('<img src="x">') === "unknown")
 
 // ---- parseRpm / parseTempC ----
 check("parseRpm: bare integer", parseRpm("3120\n") === 3120)

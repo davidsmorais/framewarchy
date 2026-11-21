@@ -1,6 +1,6 @@
 # Framework Fan Control for Omarchy
 
-![Framework Fan Control: Automatic and Manual panel states](preview.png)
+<p align="center"><img src="preview.png" width="420" alt="Framework Fan Control"></p>
 
 A bar widget for Framework laptops: the fan's RPM and the EC's CPU
 temperature in the bar, and a popup that switches the fan between the
@@ -8,13 +8,22 @@ embedded controller's automatic control and a manual duty cycle.
 
 ## Screenshots
 
+![Automatic and Manual panel states side by side](docs/panels.png)
+
 | Bar widget | Automatic | Manual |
 | :---: | :---: | :---: |
-| <img src="docs/bar-widget.png" width="200" alt="Bar widget showing fan duty and CPU temperature"> | <img src="docs/panel-automatic.png" width="300" alt="Panel in automatic mode with a staged 60% duty"> | <img src="docs/panel-manual.png" width="300" alt="Panel in manual mode at 100%"> |
+| <img src="docs/bar-widget.png" width="200" alt="Bar widget showing fan duty and CPU temperature"> | <img src="docs/panel-automatic.png" width="300" alt="Panel in automatic mode with a staged 80% duty"> | <img src="docs/panel-manual.png" width="300" alt="Panel in manual mode at 100%"> |
+
 ## Features
 
 - **Automatic / Manual** toggle, a 10–100 % slider (step 10), and three
   presets: Quiet 30 %, Balanced 60 %, Full 100 %.
+- **Automatic fan curve** presets — Stock, Quiet (+6°), Silent (+12°) —
+  that shift the EC's own ramp thresholds so automatic mode reacts later
+  to load. Warn and critical thresholds are never touched, the battery
+  sensor keeps its own protection, and a full power-off resets to Stock.
+  The active curve is read back from the EC (`ectool thermalget`), so the
+  widget shows what the EC is really running.
 - The slider **stages** while automatic: moving it never touches the fan
   until Manual is engaged. Presets engage manual directly.
 - Right-click the bar icon to restore automatic control immediately.
@@ -55,13 +64,16 @@ systemd suspend hook. Nothing goes into `/usr/share/omarchy/`.
 
 ## Safety
 
-- The sudoers whitelist is enumerated: `auto` and the eleven valid duties,
-  nothing else. The helper re-validates the duty itself, so a bad value
-  fails twice.
+- The sudoers whitelist is enumerated: `auto`, the eleven valid duties,
+  `curve stock|quiet|silent` and `curves` — nothing else. The helper
+  re-validates every value itself, so a bad value fails twice.
+- Curve presets only shift each sensor's `fan_off`/`fan_max`; warn, high
+  and halt stay at stock values, and the battery sensor is skipped.
 - **Suspend:** the system-sleep hook returns the fan to automatic control
   before sleeping whenever a manual duty was active.
 - **Reboot:** the EC forgets manual duties; the plugin compares the boot id
-  in the state file and reports automatic.
+  in the state file and reports automatic. A full power-off also resets
+  the curve to Stock.
 - Manual 0 % is not offered — 10 % is the floor.
 - Only one controller at a time: don't also run `fw-fanctrl` or engage the
   Max mode of another fan widget.

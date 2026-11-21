@@ -18,17 +18,41 @@ export OMARCHY_FANCTL_STATE_DIR=$work/state
 export OMARCHY_FANCTL_ALLOW_UNPRIVILEGED=1
 mkdir -p "$OMARCHY_FANCTL_STATE_DIR" "$work/bin"
 
-# The fake ectool records its arguments and answers like the real one.
+# The fake ectool records its arguments and answers like the real one. The
+# thermal engine keeps its thresholds in a file, so thermalset/thermalget
+# round-trip the way the real EC does.
 cat > "$work/bin/ectool" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$(dirname -- "$0")/ectool.log"
+log="$(dirname -- "$0")/ectool.log"
+printf '%s\n' "$*" >> "$log"
 case "$1" in
   fanduty)     echo "Fan duty cycle set for all fans." ;;
   autofanctrl) echo "Automatic fan control is now on for fan 0" ;;
+  thermalset)
+    thresholds="$(dirname -- "$0")/thresholds"
+    sid=$2; off=$6; max=$7
+    grep -v "^$sid " "$thresholds" > "$thresholds.new" 2>/dev/null || true
+    printf '%s %s %s\n' "$sid" "$off" "$max" >> "$thresholds.new"
+    sort -n -k1 "$thresholds.new" > "$thresholds"
+    rm -f "$thresholds.new"
+    ;;
+  thermalget)
+    echo "sensor  warn  high  halt   fan_off fan_max   name"
+    while read -r sid off max; do
+      printf '  %s      0     0      0      %-7s %-9s sensor-%s\n' "$sid" "$off" "$max" "$sid"
+    done < "$(dirname -- "$0")/thresholds"
+    ;;
   *) echo "unexpected command: $*" >&2; exit 1 ;;
 esac
 EOF
 chmod +x "$work/bin/ectool"
+# Stock thresholds, in the same shape `ectool thermalget` reports.
+cat > "$work/bin/thresholds" <<'EOF'
+0 313 328
+1 323 341
+3 313 342
+4 328 358
+EOF
 export PATH="$work/bin:$PATH"
 
 # A cros_ec hwmon with a fan and a CPU-labeled sensor, plus coretemp's
@@ -107,6 +131,43 @@ after=$(cat "$work/bin/ectool.log" 2>/dev/null || printf '')
 log_has "autofanctrl 0";                   check "auto: ectool autofanctrl 0" $?
 state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
 contains '"mode":"auto"' "$state";        check "auto: state auto" $?
+
+# ---- automatic curve presets --------------------------------------------
+"$helper" curve quiet >/dev/null 2>&1;    check "curve quiet: exit 0" $?
+log_has "thermalset 1 0 361 371 329 347"; check "curve quiet: cpu sensor shifted +6" $?
+log_has "thermalset 0 0 361 371 319 334"; check "curve quiet: local sensor shifted +6" $?
+if log_has "thermalset 2 "; then false; else true; fi
+                                          check "curve quiet: battery sensor untouched" $?
+state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
+contains '"curve":"quiet"' "$state";      check "curve quiet: state curve quiet" $?
+contains '"mode":"auto"' "$state";        check "curve quiet: mode preserved" $?
+
+out=$("$helper" curves)
+contains '"curve":"quiet"' "$out";        check "curves: reports quiet from thermalget" $?
+
+"$helper" curve silent >/dev/null 2>&1;   check "curve silent: exit 0" $?
+out=$("$helper" curves)
+contains '"curve":"silent"' "$out";       check "curves: reports silent" $?
+
+"$helper" curve stock >/dev/null 2>&1;    check "curve stock: exit 0" $?
+out=$("$helper" curves)
+contains '"curve":"stock"' "$out";        check "curves: back to stock" $?
+state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
+contains '"curve":"stock"' "$state";      check "curve stock: state curve stock" $?
+
+before=$(cat "$work/bin/ectool.log" 2>/dev/null || printf '')
+"$helper" curve abc >/dev/null 2>&1;      [ $? -ne 0 ]; check "curve abc: rejected" $?
+after=$(cat "$work/bin/ectool.log" 2>/dev/null || printf '')
+[ "$before" = "$after" ];                 check "curve abc: ectool not called" $?
+
+# A curve change keeps the current mode and duty.
+"$helper" manual 60 >/dev/null 2>&1;      check "manual 60: exit 0" $?
+"$helper" curve quiet >/dev/null 2>&1;    check "curve quiet in manual: exit 0" $?
+state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
+contains '"mode":"manual"' "$state";      check "curve in manual: mode kept" $?
+contains '"dutyPercent":60' "$state";     check "curve in manual: duty kept" $?
+"$helper" curve stock >/dev/null 2>&1
+"$helper" auto >/dev/null 2>&1
 
 # ---- a state file from an earlier boot means automatic ------------------
 printf '{"protocolVersion":1,"mode":"manual","dutyPercent":40,"bootId":"stale-boot","updated":1}\n' \

@@ -82,6 +82,22 @@ read_cpu_temp_c() {
 
 boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf 'unknown\n'; }
 
+# The stock EC thermal curve, captured with `ectool thermalget` on a
+# Framework 13 (temps in Kelvin): sensor warn high halt fan_off fan_max.
+# The battery sensor (2) is deliberately absent — its own halt threshold
+# protects the pack, and the presets never touch it. warn/high/halt are
+# always written at stock values: the presets only shift the fan ramp.
+readonly STOCK_CURVE=$'0 0 361 371 313 328\n1 0 361 371 323 341\n3 0 360 370 313 342\n4 0 0 0 328 358'
+
+curve_offset() {
+  case $1 in
+    stock)  printf '0\n' ;;
+    quiet)  printf '6\n' ;;
+    silent) printf '12\n' ;;
+    *)      return 1 ;;
+  esac
+}
+
 # state.json is one line written by write_state; the mode and duty are picked
 # out with fixed-string greps rather than a JSON parser so the helper has no
 # dependencies beyond bash and ectool.
@@ -91,12 +107,21 @@ read_state_field() {
   printf '%s' "$text" | grep -o "\"$key\":[^,}]*" | head -1 | sed 's/^"[^"]*"://; s/"//g'
 }
 
+current_curve() {
+  local c
+  c=$(read_state_field curve || true)
+  case $c in
+    stock|quiet|silent) printf '%s\n' "$c" ;;
+    *) printf 'stock\n' ;;
+  esac
+}
+
 write_state() {
-  local mode=$1 duty=$2 file
+  local mode=$1 duty=$2 curve=${3:-$(current_curve)} file
   mkdir -p -- "$(state_dir)"
   file=$(state_file)
-  printf '{"protocolVersion":%d,"mode":"%s","dutyPercent":%d,"bootId":"%s","updated":%d}\n' \
-    "$PROTOCOL_VERSION" "$mode" "$duty" "$(boot_id)" "$(date +%s)" > "$file.tmp"
+  printf '{"protocolVersion":%d,"mode":"%s","dutyPercent":%d,"curve":"%s","bootId":"%s","updated":%d}\n' \
+    "$PROTOCOL_VERSION" "$mode" "$duty" "$curve" "$(boot_id)" "$(date +%s)" > "$file.tmp"
   chmod 0644 "$file.tmp"
   mv -f "$file.tmp" "$file"
 }
@@ -147,10 +172,51 @@ cmd_manual() {
   printf 'fan duty set to %d%%\n' "$duty"
 }
 
+# Shift the EC's own automatic ramp, sensor by sensor, at stock
+# warn/high/halt. The EC keeps every protection threshold; a full
+# power-off resets the curve to stock.
+cmd_curve() {
+  local name=$1 offset sid warn high halt off max mode duty
+  offset=$(curve_offset "$name") || fail "curve must be stock, quiet or silent"
+  require_root
+  while read -r sid warn high halt off max; do
+    run_ectool thermalset "$sid" "$warn" "$high" "$halt" "$((off + offset))" "$((max + offset))" >/dev/null
+  done <<< "$STOCK_CURVE"
+  mode=$(read_state_field mode || true)
+  [[ $mode == manual ]] || mode=auto
+  duty=$(read_state_field dutyPercent || true)
+  [[ $duty =~ ^[0-9]+$ ]] || duty=0
+  write_state "$mode" "$duty" "$name"
+  printf 'automatic curve set to %s\n' "$name"
+}
+
+# Report which preset the EC is actually running, read from thermalget —
+# the EC, not the state file, is the truth after a power-off.
+cmd_curves() {
+  local text name match offset sid warn high halt off max got_off got_max
+  require_root
+  text=$(ectool thermalget 2>/dev/null) || { printf '{"protocolVersion":%d,"curve":"unknown"}\n' "$PROTOCOL_VERSION"; return 0; }
+  match=""
+  for name in stock quiet silent; do
+    offset=$(curve_offset "$name")
+    match=$name
+    while read -r sid warn high halt off max; do
+      got_off=$(printf '%s' "$text" | awk -v sid="$sid" 'NR > 1 && $1 == sid { print $5; exit }')
+      got_max=$(printf '%s' "$text" | awk -v sid="$sid" 'NR > 1 && $1 == sid { print $6; exit }')
+      [[ $got_off == $((off + offset)) && $got_max == $((max + offset)) ]] || { match=""; break; }
+    done <<< "$STOCK_CURVE"
+    [[ -n $match ]] && break
+  done
+  [[ -n $match ]] || match=custom
+  printf '{"protocolVersion":%d,"curve":"%s"}\n' "$PROTOCOL_VERSION" "$match"
+}
+
 case ${1:-} in
   status)  cmd_status ;;
   auto)    cmd_auto ;;
   manual)  [[ -n ${2:-} ]] || fail "usage: omarchy-fanctl manual <10..100>"; cmd_manual "$2" ;;
+  curve)   [[ -n ${2:-} ]] || fail "usage: omarchy-fanctl curve <stock|quiet|silent>"; cmd_curve "$2" ;;
+  curves)  cmd_curves ;;
   version) printf 'omarchy-fanctl protocol %d\n' "$PROTOCOL_VERSION" ;;
-  *)       printf 'usage: omarchy-fanctl <status|auto|manual 10..100|version>\n' >&2; exit 1 ;;
+  *)       printf 'usage: omarchy-fanctl <status|auto|manual 10..100|curve stock|quiet|silent|curves|version>\n' >&2; exit 1 ;;
 esac
