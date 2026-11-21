@@ -4,7 +4,9 @@
 
 A bar widget for Framework laptops: the fan's RPM and the EC's CPU
 temperature in the bar, and a popup that switches the fan between the
-embedded controller's automatic control and a manual duty cycle.
+embedded controller's automatic control and a manual duty cycle. The same
+popup shows the battery and can cap charging between two levels to preserve
+its lifespan.
 
 ## Screenshots
 
