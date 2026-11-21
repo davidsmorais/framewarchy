@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# discover-fan — unprivileged one-shot discovery for the io.github.davidsmorais.omarchy-framework-fan-control plugin.
+#
+# Prints the paths the plugin should poll:
+#
+#   fan=<path>   cros_ec fan1_input (RPM)
+#   temp=<path>  the EC's CPU-labeled sensor, falling back to coretemp's
+#                "Package id 0" sensor
+#
+# A missing line means that sensor was not found. OMARCHY_FANCTL_TEST_ROOT
+# replaces /sys/class/hwmon for the test suite.
+
+set -u
+
+root=${OMARCHY_FANCTL_TEST_ROOT:-/sys/class/hwmon}
+
+fan=""
+temp=""
+
+for dir in "$root"/hwmon*; do
+  [ -r "$dir/name" ] || continue
+  IFS= read -r name < "$dir/name" || continue
+
+  if [ "$name" = cros_ec ] && [ -r "$dir/fan1_input" ] && [ -z "$fan" ]; then
+    fan="$dir/fan1_input"
+    for label_file in "$dir"/temp*_label; do
+      [ -r "$label_file" ] || continue
+      IFS= read -r label < "$label_file" || continue
+      case "$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')" in
+        *cpu*)
+          temp="${label_file%_label}_input"
+          break
+          ;;
+      esac
+    done
+  fi
+done
+
+# The die temperature is what a person means by "CPU temp": prefer coretemp's
+# Package sensor and keep the EC's CPU-labeled sensor as the fallback. On a
+# Framework 13 the EC sensor reads well below the die temperature.
+for dir in "$root"/hwmon*; do
+  [ -r "$dir/name" ] || continue
+  IFS= read -r name < "$dir/name" || continue
+  [ "$name" = coretemp ] || continue
+  for label_file in "$dir"/temp*_label; do
+    [ -r "$label_file" ] || continue
+    IFS= read -r label < "$label_file" || continue
+    [ "$label" = "Package id 0" ] || continue
+    temp="${label_file%_label}_input"
+    break
+  done
+  [ -z "$temp" ] || break
+done
+
+[ -n "$fan" ] && printf 'fan=%s\n' "$fan"
+[ -n "$temp" ] && printf 'temp=%s\n' "$temp"

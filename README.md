@@ -1,0 +1,93 @@
+# Framework Fan Control for Omarchy
+
+![Framework Fan Control: Automatic and Manual panel states](preview.png)
+
+A bar widget for Framework laptops: the fan's RPM and the EC's CPU
+temperature in the bar, and a popup that switches the fan between the
+embedded controller's automatic control and a manual duty cycle.
+
+## Screenshots
+
+| Bar widget | Automatic | Manual |
+| :---: | :---: | :---: |
+| <img src="docs/bar-widget.png" width="200" alt="Bar widget showing fan duty and CPU temperature"> | <img src="docs/panel-automatic.png" width="300" alt="Panel in automatic mode with a staged 60% duty"> | <img src="docs/panel-manual.png" width="300" alt="Panel in manual mode at 100%"> |
+## Features
+
+- **Automatic / Manual** toggle, a 10–100 % slider (step 10), and three
+  presets: Quiet 30 %, Balanced 60 %, Full 100 %.
+- The slider **stages** while automatic: moving it never touches the fan
+  until Manual is engaged. Presets engage manual directly.
+- Right-click the bar icon to restore automatic control immediately.
+- Panel keys: `1`/`2`/`3` presets, `A` automatic, `Esc` closes.
+- Monitoring (RPM, CPU temp, current mode) is read straight from hwmon
+  sysfs and a world-readable state file — no process per reading.
+
+## Why ectool
+
+The Framework 13 EC exposes RPM and temperatures through the `cros_ec`
+hwmon device, but **not** PWM control (`pwm1`/`pwm1_enable` are absent on
+current kernels), so sysfs-based fan plugins cannot control this machine.
+Duty is set through `ectool` (`fanduty` / `autofanctrl`) against the
+root-only `/dev/cros_ec`.
+
+## Requirements
+
+- Omarchy with the manifest-based Quickshell plugin API
+- A Framework laptop with a `cros_ec` hwmon fan
+- `fw-ectool-git` (AUR) providing `/usr/bin/ectool`
+- `sudo` and `visudo` (no `jq` or other helpers)
+
+## Install
+
+```bash
+omarchy plugin add https://github.com/davidsmorais/omarchy-framework-fan-control --yes
+cd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control
+sudo ./setup install
+omarchy plugin enable io.github.davidsmorais.omarchy-framework-fan-control
+omarchy bar move io.github.davidsmorais.omarchy-framework-fan-control --section right
+```
+
+`setup install` copies the root-owned helper to
+`/usr/local/libexec/omarchy-fanctl`, creates `/var/lib/omarchy-fanctl/`
+(state, world-readable), installs a sudoers rule allowing **only**
+`omarchy-fanctl auto` and `omarchy-fanctl manual 10..100`, and installs a
+systemd suspend hook. Nothing goes into `/usr/share/omarchy/`.
+
+## Safety
+
+- The sudoers whitelist is enumerated: `auto` and the eleven valid duties,
+  nothing else. The helper re-validates the duty itself, so a bad value
+  fails twice.
+- **Suspend:** the system-sleep hook returns the fan to automatic control
+  before sleeping whenever a manual duty was active.
+- **Reboot:** the EC forgets manual duties; the plugin compares the boot id
+  in the state file and reports automatic.
+- Manual 0 % is not offered — 10 % is the floor.
+- Only one controller at a time: don't also run `fw-fanctrl` or engage the
+  Max mode of another fan widget.
+
+## Update
+
+```bash
+cd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control
+sudo ./setup install     # keeps the installed helper in sync
+```
+
+## Uninstall
+
+```bash
+cd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control
+sudo ./setup uninstall   # restores automatic control, removes every trace
+omarchy plugin disable io.github.davidsmorais.omarchy-framework-fan-control
+omarchy plugin remove io.github.davidsmorais.omarchy-framework-fan-control --yes
+```
+
+## Development
+
+```bash
+tests/run
+```
+
+`helper.test.sh` drives the helper against a fake sysfs tree and a fake
+`ectool`; `model.test.js` runs Model.js under node, including markup-shaped
+input cases for every value that reaches a tooltip or label.

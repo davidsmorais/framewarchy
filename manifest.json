@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.davidsmorais.omarchy-framework-fan-control",
+  "name": "Framework Fan Control",
+  "version": "0.1.0",
+  "author": "David Morais",
+  "license": "MIT",
+  "description": "Automatic and manual fan duty for Framework laptops through the whitelisted omarchy-fanctl helper and ectool",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Framework Fan",
+    "description": "Switch the Framework fan between automatic control and a manual duty with presets",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "defaultManualPercent": 50
+    },
+    "schema": [
+      {
+        "key": "defaultManualPercent",
+        "type": "integer",
+        "label": "Default manual fan speed",
+        "min": 10,
+        "max": 100,
+        "step": 10,
+        "defaultValue": 50,
+        "description": "The duty staged when manual control engages."
+      }
+    ]
+  }
+}

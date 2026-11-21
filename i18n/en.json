@@ -1,0 +1,17 @@
+{
+  "title": "Fan",
+  "mode.auto": "Automatic",
+  "mode.manual": "Manual",
+  "section.control": "Control",
+  "section.presets": "Presets",
+  "preset.quiet": "Quiet",
+  "preset.balanced": "Balanced",
+  "preset.full": "Full",
+  "tooltip.auto": "Fan %1 RPM · CPU %2°C",
+  "tooltip.manual": "Manual %1% · %2 RPM · CPU %3°C",
+  "hint.staged": "Engage Manual to apply %1%",
+  "hint.keys": "1–3 presets · A automatic · Esc closes",
+  "status.noFan": "No Framework fan (cros_ec) was found on this machine.",
+  "status.noHelper": "Fan control needs the privileged helper. In a terminal:\ncd ~/.config/omarchy/plugins/io.github.davidsmorais.omarchy-framework-fan-control && sudo ./setup install",
+  "status.error": "Could not control the fan: %1"
+}

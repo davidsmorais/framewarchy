@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# Systemd system-sleep hook installed by io.github.davidsmorais.omarchy-framework-fan-control's setup.
+#
+# Restores automatic fan control before suspend when a manual duty was
+# active, so the EC never sleeps with a pinned duty. Runs as root; exit 0
+# always — a failed restore must never block suspend.
+
+set -u
+
+[ "${1:-}" = pre ] || exit 0
+
+helper=/usr/local/libexec/omarchy-fanctl
+state=/var/lib/omarchy-fanctl/state.json
+
+[ -x "$helper" ] || exit 0
+[ -r "$state" ] || exit 0
+grep -Fq '"mode":"manual"' "$state" || exit 0
+
+"$helper" auto || echo "omarchy-fanctl: could not restore automatic fan control before suspend" >&2
+exit 0

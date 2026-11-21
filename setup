@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+#
+# setup — install/remove the privileged integration for io.github.davidsmorais.omarchy-framework-fan-control.
+#
+#   sudo ./setup install [--user USER]    install helper, sudo whitelist,
+#                                         state dir and the suspend hook
+#   sudo ./setup status [--user USER]     report what is installed
+#   sudo ./setup uninstall [--user USER]  restore automatic control and
+#                                         remove everything
+#
+# The sudoers rule permits exactly `auto` and `manual 10..100` (step 10) on
+# the root-owned helper — the shell never gets anything else as root.
+
+set -euo pipefail
+
+readonly HELPER=/usr/local/libexec/omarchy-fanctl
+readonly SUDOERS_PREFIX=/etc/sudoers.d/omarchy-fanctl
+readonly SLEEP_HOOK=/usr/lib/systemd/system-sleep/omarchy-fanctl
+readonly STATE_DIR=/var/lib/omarchy-fanctl
+readonly SOURCE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+fail() {
+  printf 'setup: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  printf 'Usage: sudo ./setup <install|status|uninstall> [--user USER]\n'
+}
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || fail "run this setup as root"
+
+action=${1:-}
+[[ -n $action ]] || { usage; exit 1; }
+shift
+
+target_user=${SUDO_USER:-}
+while (( $# > 0 )); do
+  case $1 in
+    --user)
+      target_user=${2:-}
+      [[ -n $target_user ]] || fail "--user requires a user name"
+      shift 2
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ $target_user =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || fail "could not determine a safe target user; pass --user USER"
+id "$target_user" >/dev/null 2>&1 || fail "unknown user: $target_user"
+
+sudoers_file="$SUDOERS_PREFIX-$target_user"
+
+write_sudoers() {
+  local temporary
+  temporary=$(mktemp /etc/sudoers.d/.omarchy-fanctl.XXXXXX)
+  trap 'rm -f -- "$temporary"' EXIT
+  {
+    printf '%s ALL=(root) NOPASSWD: ' "$target_user"
+    printf '%s auto' "$HELPER"
+    local percent
+    for percent in 10 20 30 40 50 60 70 80 90 100; do
+      printf ', %s manual %d' "$HELPER" "$percent"
+    done
+    printf '\n'
+  } > "$temporary"
+  chmod 0440 "$temporary"
+  /usr/sbin/visudo -cf "$temporary" >/dev/null
+  /usr/bin/install -o root -g root -m 0440 "$temporary" "$sudoers_file"
+  rm -f -- "$temporary"
+  trap - EXIT
+}
+
+seed_state() {
+  /usr/bin/install -d -o root -g root -m 0755 "$STATE_DIR"
+  [[ -f $STATE_DIR/state.json ]] || printf '{"protocolVersion":1,"mode":"auto","dutyPercent":0,"bootId":"","updated":0}\n' > "$STATE_DIR/state.json"
+  chmod 0644 "$STATE_DIR/state.json"
+}
+
+install_all() {
+  /usr/bin/install -d -o root -g root -m 0755 /usr/local/libexec
+  /usr/bin/install -o root -g root -m 0755 "$SOURCE_DIR/bin/omarchy-fanctl" "$HELPER"
+  seed_state
+  write_sudoers
+  /usr/bin/install -d -o root -g root -m 0755 "$(dirname -- "$SLEEP_HOOK")"
+  /usr/bin/install -o root -g root -m 0755 "$SOURCE_DIR/sleep/omarchy-fanctl" "$SLEEP_HOOK"
+  printf 'Installed helper, sudo rule for %s, state dir and suspend hook\n' "$target_user"
+}
+
+show_status() {
+  local piece
+  for piece in "$HELPER" "$STATE_DIR/state.json" "$sudoers_file" "$SLEEP_HOOK"; do
+    if [[ -e $piece ]]; then printf 'present  %s\n' "$piece"; else printf 'missing  %s\n' "$piece"; fi
+  done
+  [[ -f $sudoers_file ]] && /usr/sbin/visudo -cf "$sudoers_file" >/dev/null && printf 'sudo rule validates\n'
+  [[ -x $HELPER ]] && "$HELPER" status
+}
+
+uninstall_all() {
+  if [[ -x $HELPER && -r $STATE_DIR/state.json ]] && grep -Fq '"mode":"manual"' "$STATE_DIR/state.json"; then
+    if "$HELPER" auto; then
+      printf 'automatic fan control restored\n'
+    else
+      printf 'setup: WARNING could not restore automatic fan control; the fan may stay at its last manual duty until the next reboot\n' >&2
+    fi
+  fi
+  rm -f -- "$sudoers_file" "$HELPER" "$SLEEP_HOOK"
+  rm -rf -- "$STATE_DIR"
+  printf 'Removed helper, sudo rule, suspend hook and state for %s\n' "$target_user"
+}
+
+case $action in
+  install)   install_all ;;
+  status)    show_status ;;
+  uninstall) uninstall_all ;;
+  *)         usage; exit 1 ;;
+esac

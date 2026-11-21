@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# Run every test in this directory. bash tests the privileged helper against
+# a fake sysfs tree; node tests Model.js.
+
+set -uo pipefail
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+status=0
+
+bash "$here/helper.test.sh" || status=1
+printf '\n'
+node "$here/model.test.js" || status=1
+
+exit "$status"

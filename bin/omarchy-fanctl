@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+#
+# omarchy-fanctl — privileged fan control helper for Framework laptops.
+#
+# The Framework 13 EC (cros_ec) exposes RPM and temperatures through hwmon
+# sysfs, but no PWM control: /dev/cros_ec is root-only, so the fan duty is set
+# with ectool (EC_CMD_PWM_SET_FAN_DUTY / EC_CMD_THERMAL_AUTO_FAN_CTRL). The
+# shell plugin runs this helper through a sudoers whitelist that permits
+# exactly `auto` and `manual 10..100` — nothing else executes as root.
+#
+# Every successful control command rewrites state.json (world-readable)
+# recording the mode, the boot id, and the duty, so the plugin can read the
+# real state without privileges. A boot id mismatch means the EC forgot a
+# manual duty across a reboot: the reported mode falls back to automatic.
+#
+# Testing: OMARCHY_FANCTL_TEST_ROOT replaces /sys/class/hwmon,
+# OMARCHY_FANCTL_STATE_DIR replaces the state directory, a fake `ectool` on
+# PATH stands in for the real one, and OMARCHY_FANCTL_ALLOW_UNPRIVILEGED=1
+# lifts the root check so the test suite can drive `auto`/`manual`.
+
+set -euo pipefail
+
+readonly PROTOCOL_VERSION=1
+readonly DEFAULT_HWMON_ROOT=/sys/class/hwmon
+readonly DEFAULT_STATE_DIR=/var/lib/omarchy-fanctl
+readonly MIN_DUTY=10
+readonly MAX_DUTY=100
+
+fail() {
+  printf 'omarchy-fanctl: %s\n' "$*" >&2
+  exit 1
+}
+
+hwmon_root() { printf '%s\n' "${OMARCHY_FANCTL_TEST_ROOT:-$DEFAULT_HWMON_ROOT}"; }
+state_dir()  { printf '%s\n' "${OMARCHY_FANCTL_STATE_DIR:-$DEFAULT_STATE_DIR}"; }
+state_file() { printf '%s/state.json\n' "$(state_dir)"; }
+
+require_root() {
+  if [[ ${EUID:-$(id -u)} -ne 0 && ${OMARCHY_FANCTL_ALLOW_UNPRIVILEGED:-} != 1 ]]; then
+    fail "fan control requires root"
+  fi
+}
+
+# Exactly one cros_ec hwmon device with a readable fan RPM input.
+find_device() {
+  local root name name_file device
+  root=$(hwmon_root)
+  for name_file in "$root"/hwmon*/name; do
+    [[ -r $name_file ]] || continue
+    IFS= read -r name < "$name_file" || continue
+    [[ $name == cros_ec ]] || continue
+    device=${name_file%/name}
+    [[ -r $device/fan1_input ]] || continue
+    printf '%s\n' "$device"
+    return 0
+  done
+  return 1
+}
+
+read_number() {
+  local value
+  [[ -r $1 ]] || return 1
+  IFS= read -r value < "$1" || return 1
+  [[ $value =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+# The EC's CPU-labeled sensor (e.g. "cpu_f75303@4d"), in whole degrees C.
+read_cpu_temp_c() {
+  local device=$1 label_file label input millidegrees
+  for label_file in "$device"/temp*_label; do
+    [[ -r $label_file ]] || continue
+    IFS= read -r label < "$label_file" || continue
+    [[ ${label,,} == *cpu* ]] || continue
+    input=${label_file%_label}_input
+    millidegrees=$(read_number "$input") || continue
+    printf '%d\n' "$(( (millidegrees + 500) / 1000 ))"
+    return 0
+  done
+  return 1
+}
+
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf 'unknown\n'; }
+
+# state.json is one line written by write_state; the mode and duty are picked
+# out with fixed-string greps rather than a JSON parser so the helper has no
+# dependencies beyond bash and ectool.
+read_state_field() {
+  local key=$1 text
+  text=$(cat "$(state_file)" 2>/dev/null) || return 1
+  printf '%s' "$text" | grep -o "\"$key\":[^,}]*" | head -1 | sed 's/^"[^"]*"://; s/"//g'
+}
+
+write_state() {
+  local mode=$1 duty=$2 file
+  mkdir -p -- "$(state_dir)"
+  file=$(state_file)
+  printf '{"protocolVersion":%d,"mode":"%s","dutyPercent":%d,"bootId":"%s","updated":%d}\n' \
+    "$PROTOCOL_VERSION" "$mode" "$duty" "$(boot_id)" "$(date +%s)" > "$file.tmp"
+  chmod 0644 "$file.tmp"
+  mv -f "$file.tmp" "$file"
+}
+
+run_ectool() {
+  command -v ectool >/dev/null 2>&1 || fail "ectool is not installed (fw-ectool-git)"
+  ectool "$@" || fail "ectool $* failed"
+}
+
+cmd_status() {
+  local device rpm cpu_temp mode duty state_text
+  if ! device=$(find_device); then
+    printf '{"protocolVersion":%d,"available":false,"reason":"no cros_ec fan on this machine"}\n' "$PROTOCOL_VERSION"
+    return 0
+  fi
+  rpm=$(read_number "$device/fan1_input") || rpm=0
+  cpu_temp=$(read_cpu_temp_c "$device") || cpu_temp=-1
+
+  mode=auto
+  duty=0
+  if state_text=$(cat "$(state_file)" 2>/dev/null); then
+    if printf '%s' "$state_text" | grep -Fq "\"bootId\":\"$(boot_id)\""; then
+      mode=$(read_state_field mode)
+      [[ $mode == manual ]] || mode=auto
+      duty=$(read_state_field dutyPercent)
+      [[ $duty =~ ^[0-9]+$ ]] || duty=0
+    fi
+  fi
+
+  printf '{"protocolVersion":%d,"available":true,"mode":"%s","dutyPercent":%d,"rpm":%d,"cpuTempC":%d}\n' \
+    "$PROTOCOL_VERSION" "$mode" "$duty" "$rpm" "$cpu_temp"
+}
+
+cmd_auto() {
+  require_root
+  run_ectool autofanctrl 0 >/dev/null
+  write_state auto 0
+  printf 'automatic fan control restored\n'
+}
+
+cmd_manual() {
+  local duty=$1
+  [[ $duty =~ ^[0-9]+$ ]] || fail "duty must be an integer percent"
+  (( duty >= MIN_DUTY && duty <= MAX_DUTY )) || fail "duty must be between $MIN_DUTY and $MAX_DUTY"
+  require_root
+  run_ectool fanduty "$duty" >/dev/null
+  write_state manual "$duty"
+  printf 'fan duty set to %d%%\n' "$duty"
+}
+
+case ${1:-} in
+  status)  cmd_status ;;
+  auto)    cmd_auto ;;
+  manual)  [[ -n ${2:-} ]] || fail "usage: omarchy-fanctl manual <10..100>"; cmd_manual "$2" ;;
+  version) printf 'omarchy-fanctl protocol %d\n' "$PROTOCOL_VERSION" ;;
+  *)       printf 'usage: omarchy-fanctl <status|auto|manual 10..100|version>\n' >&2; exit 1 ;;
+esac
