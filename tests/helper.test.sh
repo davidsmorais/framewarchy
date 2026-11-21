@@ -27,19 +27,19 @@ log="$(dirname -- "$0")/ectool.log"
 printf '%s\n' "$*" >> "$log"
 case "$1" in
   fanduty)     echo "Fan duty cycle set for all fans." ;;
-  autofanctrl) echo "Automatic fan control is now on for fan 0" ;;
+  autofanctrl) echo "Automatic fan control is now on for all fans" ;;
   thermalset)
     thresholds="$(dirname -- "$0")/thresholds"
-    sid=$2; off=$6; max=$7
+    sid=$2
     grep -v "^$sid " "$thresholds" > "$thresholds.new" 2>/dev/null || true
-    printf '%s %s %s\n' "$sid" "$off" "$max" >> "$thresholds.new"
+    printf '%s %s %s %s %s %s\n' "$sid" "$3" "$4" "$5" "$6" "$7" >> "$thresholds.new"
     sort -n -k1 "$thresholds.new" > "$thresholds"
     rm -f "$thresholds.new"
     ;;
   thermalget)
     echo "sensor  warn  high  halt   fan_off fan_max   name"
-    while read -r sid off max; do
-      printf '  %s      0     0      0      %-7s %-9s sensor-%s\n' "$sid" "$off" "$max" "$sid"
+    while read -r sid warn high halt off max; do
+      printf '  %s      %-5s %-5s  %-5s  %-7s %-9s sensor-%s\n' "$sid" "$warn" "$high" "$halt" "$off" "$max" "$sid"
     done < "$(dirname -- "$0")/thresholds"
     ;;
   *) echo "unexpected command: $*" >&2; exit 1 ;;
@@ -47,11 +47,13 @@ esac
 EOF
 chmod +x "$work/bin/ectool"
 # Stock thresholds, in the same shape `ectool thermalget` reports.
+# This device's own warn/high/halt differ from any other Framework's.
 cat > "$work/bin/thresholds" <<'EOF'
-0 313 328
-1 323 341
-3 313 342
-4 328 358
+0 0 355 365 313 328
+1 0 357 367 323 341
+2 0 350 360 300 320
+3 0 358 368 313 342
+4 0 0 0 328 358
 EOF
 export PATH="$work/bin:$PATH"
 
@@ -128,14 +130,16 @@ after=$(cat "$work/bin/ectool.log" 2>/dev/null || printf '')
 
 # ---- back to automatic ---------------------------------------------------
 "$helper" auto >/dev/null 2>&1;           check "auto: exit 0" $?
-log_has "autofanctrl 0";                   check "auto: ectool autofanctrl 0" $?
+log_has "autofanctrl";                     check "auto: ectool autofanctrl" $?
+if log_has "autofanctrl 0"; then false; else true; fi
+                                          check "auto: all fans, not just fan 0" $?
 state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
 contains '"mode":"auto"' "$state";        check "auto: state auto" $?
 
 # ---- automatic curve presets --------------------------------------------
 "$helper" curve quiet >/dev/null 2>&1;    check "curve quiet: exit 0" $?
-log_has "thermalset 1 0 361 371 329 347"; check "curve quiet: cpu sensor shifted +6" $?
-log_has "thermalset 0 0 361 371 319 334"; check "curve quiet: local sensor shifted +6" $?
+log_has "thermalset 1 0 357 367 329 347"; check "curve quiet: cpu sensor shifted +6, own warn/high/halt kept" $?
+log_has "thermalset 0 0 355 365 319 334"; check "curve quiet: local sensor shifted +6, own warn/high/halt kept" $?
 if log_has "thermalset 2 "; then false; else true; fi
                                           check "curve quiet: battery sensor untouched" $?
 state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
@@ -152,6 +156,8 @@ contains '"curve":"silent"' "$out";       check "curves: reports silent" $?
 "$helper" curve stock >/dev/null 2>&1;    check "curve stock: exit 0" $?
 out=$("$helper" curves)
 contains '"curve":"stock"' "$out";        check "curves: back to stock" $?
+contains "1 0 357 367 323 341" "$(grep '^1 ' "$work/bin/thresholds" | head -1)"; check "curve stock: restores the device's own thresholds" $?
+contains "2 0 350 360 300 320" "$(cat "$work/bin/thresholds")"; check "curve: battery sensor untouched" $?
 state=$(cat "$OMARCHY_FANCTL_STATE_DIR/state.json")
 contains '"curve":"stock"' "$state";      check "curve stock: state curve stock" $?
 

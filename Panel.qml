@@ -131,7 +131,6 @@ Panel {
       var s = Model.parseState(text(), bootFile.text())
       root.mode = s.mode
       root.dutyPercent = s.dutyPercent
-      root.curve = s.curve
       if (s.mode === "manual" && !root.dragging) root.stagedPercent = s.dutyPercent
     }
   }

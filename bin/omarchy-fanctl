@@ -6,7 +6,8 @@
 # sysfs, but no PWM control: /dev/cros_ec is root-only, so the fan duty is set
 # with ectool (EC_CMD_PWM_SET_FAN_DUTY / EC_CMD_THERMAL_AUTO_FAN_CTRL). The
 # shell plugin runs this helper through a sudoers whitelist that permits
-# exactly `auto` and `manual 10..100` — nothing else executes as root.
+# exactly `auto`, `manual 10..100`, `curve <preset>` and `curves` — nothing else
+# executes as root.
 #
 # Every successful control command rewrites state.json (world-readable)
 # recording the mode, the boot id, and the duty, so the plugin can read the
@@ -82,12 +83,34 @@ read_cpu_temp_c() {
 
 boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf 'unknown\n'; }
 
-# The stock EC thermal curve, captured with `ectool thermalget` on a
-# Framework 13 (temps in Kelvin): sensor warn high halt fan_off fan_max.
-# The battery sensor (2) is deliberately absent — its own halt threshold
-# protects the pack, and the presets never touch it. warn/high/halt are
-# always written at stock values: the presets only shift the fan ramp.
-readonly STOCK_CURVE=$'0 0 361 371 313 328\n1 0 361 371 323 341\n3 0 360 370 313 342\n4 0 0 0 328 358'
+# The device's own thermal thresholds. The first time a curve is read or
+# changed, `ectool thermalget` is captured (minus any offset a previous
+# helper left applied) into thermal-baseline: "sensor warn high halt fan_off
+# fan_max" rows. warn/high/halt are written back exactly as the EC reported
+# them; the presets only shift fan_off and fan_max. The battery sensor (2)
+# is never captured or touched — its halt threshold protects the pack.
+baseline_file() { printf '%s/thermal-baseline\n' "$(state_dir)"; }
+
+ensure_baseline() {
+  local file text prior offset sid warn high halt off max rest rows=""
+  file=$(baseline_file)
+  [[ -s $file ]] && return 0
+  command -v ectool >/dev/null 2>&1 || return 1
+  text=$(ectool thermalget 2>/dev/null) || return 1
+  prior=$(current_curve)
+  offset=$(curve_offset "$prior") || offset=0
+  while read -r sid warn high halt off max rest; do
+    [[ $sid =~ ^[0-9]+$ && $warn =~ ^[0-9]+$ && $high =~ ^[0-9]+$ && $halt =~ ^[0-9]+$ \
+       && $off =~ ^[0-9]+$ && $max =~ ^[0-9]+$ ]] || continue
+    [[ $sid == 2 ]] && continue
+    rows+="$sid $warn $high $halt $((off - offset)) $((max - offset))"$'\n'
+  done <<< "$text"
+  [[ -n $rows ]] || return 1
+  mkdir -p -- "$(state_dir)"
+  printf '%s' "$rows" > "$file.tmp"
+  chmod 0644 "$file.tmp"
+  mv -f "$file.tmp" "$file"
+}
 
 curve_offset() {
   case $1 in
@@ -157,7 +180,7 @@ cmd_status() {
 
 cmd_auto() {
   require_root
-  run_ectool autofanctrl 0 >/dev/null
+  run_ectool autofanctrl >/dev/null
   write_state auto 0
   printf 'automatic fan control restored\n'
 }
@@ -179,9 +202,10 @@ cmd_curve() {
   local name=$1 offset sid warn high halt off max mode duty
   offset=$(curve_offset "$name") || fail "curve must be stock, quiet or silent"
   require_root
+  ensure_baseline || fail "could not read the EC's thermal thresholds (ectool thermalget)"
   while read -r sid warn high halt off max; do
     run_ectool thermalset "$sid" "$warn" "$high" "$halt" "$((off + offset))" "$((max + offset))" >/dev/null
-  done <<< "$STOCK_CURVE"
+  done < "$(baseline_file)"
   mode=$(read_state_field mode || true)
   [[ $mode == manual ]] || mode=auto
   duty=$(read_state_field dutyPercent || true)
@@ -195,6 +219,7 @@ cmd_curve() {
 cmd_curves() {
   local text name match offset sid warn high halt off max got_off got_max
   require_root
+  ensure_baseline || { printf '{"protocolVersion":%d,"curve":"unknown"}\n' "$PROTOCOL_VERSION"; return 0; }
   text=$(ectool thermalget 2>/dev/null) || { printf '{"protocolVersion":%d,"curve":"unknown"}\n' "$PROTOCOL_VERSION"; return 0; }
   match=""
   for name in stock quiet silent; do
@@ -204,7 +229,7 @@ cmd_curves() {
       got_off=$(printf '%s' "$text" | awk -v sid="$sid" 'NR > 1 && $1 == sid { print $5; exit }')
       got_max=$(printf '%s' "$text" | awk -v sid="$sid" 'NR > 1 && $1 == sid { print $6; exit }')
       [[ $got_off == $((off + offset)) && $got_max == $((max + offset)) ]] || { match=""; break; }
-    done <<< "$STOCK_CURVE"
+    done < "$(baseline_file)"
     [[ -n $match ]] && break
   done
   [[ -n $match ]] || match=custom

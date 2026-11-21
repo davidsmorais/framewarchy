@@ -5,11 +5,13 @@
 #   sudo ./setup install [--user USER]    install helper, sudo whitelist,
 #                                         state dir and the suspend hook
 #   sudo ./setup status [--user USER]     report what is installed
-#   sudo ./setup uninstall [--user USER]  restore automatic control and
-#                                         remove everything
+#   sudo ./setup uninstall [--user USER] [--force]
+#                                         remove USER's sudo rule; once no user
+#                                         has one left, restore automatic
+#                                         control and remove everything else
 #
-# The sudoers rule permits exactly `auto` and `manual 10..100` (step 10) on
-# the root-owned helper — the shell never gets anything else as root.
+# The sudoers rule permits exactly `auto`, `manual 10..100` (step 10),
+# `curve stock|quiet|silent` and `curves` on the root-owned helper — the shell never gets anything else as root.
 
 set -euo pipefail
 
@@ -35,6 +37,7 @@ action=${1:-}
 shift
 
 target_user=${SUDO_USER:-}
+force=0
 while (( $# > 0 )); do
   case $1 in
     --user)
@@ -42,6 +45,7 @@ while (( $# > 0 )); do
       [[ -n $target_user ]] || fail "--user requires a user name"
       shift 2
       ;;
+    --force) force=1; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
@@ -101,12 +105,34 @@ show_status() {
   [[ -x $HELPER ]] && "$HELPER" status
 }
 
+# Other users configured through this setup keep their grants: the shared
+# helper, hook and state only go once the last rule is gone.
 uninstall_all() {
+  local others=()
+  shopt -s nullglob
+  local rule
+  for rule in "$SUDOERS_PREFIX"-*; do
+    [[ $rule == "$sudoers_file" ]] && continue
+    others+=("$rule")
+  done
+  shopt -u nullglob
+
+  if (( ${#others[@]} > 0 )); then
+    rm -f -- "$sudoers_file"
+    printf 'Removed the sudo rule for %s; kept the helper, suspend hook and state for: %s\n' \
+      "$target_user" "${others[*]##*/omarchy-fanctl-}"
+    return 0
+  fi
+
+  # Last user: hand the fan back to the EC first, and stop if that fails so
+  # the fan is never left pinned with nothing left to release it.
   if [[ -x $HELPER && -r $STATE_DIR/state.json ]] && grep -Fq '"mode":"manual"' "$STATE_DIR/state.json"; then
     if "$HELPER" auto; then
       printf 'automatic fan control restored\n'
+    elif (( force )); then
+      printf 'setup: WARNING could not restore automatic fan control; removing anyway (--force). The fan may stay at its last manual duty until the next reboot\n' >&2
     else
-      printf 'setup: WARNING could not restore automatic fan control; the fan may stay at its last manual duty until the next reboot\n' >&2
+      fail "could not restore automatic fan control; nothing was removed. Fix the error above, or pass --force to remove anyway"
     fi
   fi
   rm -f -- "$sudoers_file" "$HELPER" "$SLEEP_HOOK"
